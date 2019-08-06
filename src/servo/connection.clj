@@ -98,15 +98,15 @@
                 :opt-arg (let [[option value] opts]
                            (.optArg expr (->rt-name option) (cond-> value (keyword? value) name)))
                 :get (.get expr (first opts))
-                :get-all (let [[field value] opts]
+                :get-all (let [[field value] (cond->> opts (= 1 (count opts)) (cons :id))]
                            (-> expr
-                               (.getAll (object-array [value]))
+                               (.getAll (into-array (cond-> value (not (coll? value)) vector)))
                                (.optArg "index" (->rt-name field))))
                 :insert (.insert expr (let [value (first opts)
-                                            value (cond-> value (or (map? value) (not (seqable? value))) vector)]
+                                            value (cond-> value (or (map? value) (not (coll? value))) vector)]
                                         (->> value (map ->rt) into-array)))
                 :update (.update expr (->rt (first opts)))
-                :delete (.delete (.get expr (:id (first opts))))
+                :delete (.delete expr)
                 :filter (let [[field value {:keys [default] :or {default false}}] opts]
                           (-> expr
                               (.filter (.hashMap r (->rt-name field) value))
@@ -123,23 +123,25 @@
     (cond
       (or (map? result) (instance? java.util.HashMap result)) (rt-> result)
       (seq? result) (map rt-> result)
+      (and (not-any? (partial = :changes) (map first expr))
+           (instance? com.rethinkdb.net.Cursor result)) (map rt-> (.toList result))
       :else result)))
 
 (defn subscribe
-  [db-connection expr value-atom]
-  (reset! value-atom (let [results (run db-connection expr)]
-                       (if (map? results)
-                         (rt-> results)
-                         (->> results (map rt->)
-                              (reduce (fn [value row] (assoc! value (:id row) row))
-                                      (transient {}))
-                              persistent!))))
+  [db-connection expr value-ref]
+  (reset! value-ref (let [results (run db-connection expr)]
+                      (if (map? results)
+                        (rt-> results)
+                        (->> results (map rt->)
+                             (reduce (fn [value row] (assoc! value (:id row) row))
+                                     (transient {}))
+                             persistent!))))
   (changes db-connection expr
-           (fn [{:keys [type new-val old-val]}]
+           (fn [{:keys [type new-val old-val] :as change}]
              (when-not (= type :state)
                (if (= type :remove)
-                 (swap! value-atom dissoc (:id old-val))
-                 (swap! value-atom assoc (:id new-val) new-val))))))
+                 (swap! value-ref dissoc (:id old-val))
+                 (swap! value-ref assoc (:id new-val) new-val))))))
 
 (defn dispose
   [{:keys [subscriptions]} subscription]
@@ -155,14 +157,14 @@
   [db-connection expr callback-fn]
   (let [sub-id (str (java.util.UUID/randomUUID))
         sub (future
-              (let [cursor (run db-connection
-                             (concat expr
-                                     [[:changes]
-                                      #_[:opt-arg :include-initial true]
-                                      [:opt-arg :squash true]
-                                      [:opt-arg :include-types true]
-                                      #_[:opt-arg :include-states true]]))]
-                (try
+              (try
+                (let [cursor (run db-connection
+                               (concat expr
+                                       [[:changes]
+                                        #_[:opt-arg :include-initial true]
+                                        [:opt-arg :squash true]
+                                        [:opt-arg :include-types true]
+                                        #_[:opt-arg :include-states true]]))]
                   (loop [changes (.iterator cursor)]
                     (when-let [change (not-empty
                                        (-> (rt-> (.next changes))
@@ -172,14 +174,14 @@
                                       :new-val nil
                                       :old-val {:id (get-in change [:new-val :id])}}
                                      change)))
-                    (recur changes))
-                  (catch Exception e
-                    (when-not (= "java.lang.InterruptedException"
-                                 (-> e Throwable->map :via first :message))
-                      (println "Error (" (pr-str expr) "):"
-                               (pr-str (Throwable->map e)))
-                      (println (.printStackTrace e))
-                      (swap! (:subscriptions db-connection) dissoc sub-id))))))]
+                    (recur changes)))
+                (catch Exception e
+                  (when-not (= "java.lang.InterruptedException"
+                               (-> e Throwable->map :via first :message))
+                    (println "Error (" (pr-str expr) "):"
+                             (pr-str (Throwable->map e)))
+                    (println (.printStackTrace e))
+                    (swap! (:subscriptions db-connection) dissoc sub-id)))))]
     (swap! (:subscriptions db-connection) assoc sub-id sub)
     sub-id))
 
