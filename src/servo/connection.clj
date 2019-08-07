@@ -11,6 +11,7 @@
 (ns servo.connection
   (:refer-clojure :exclude [compile])
   (:require [utilis.fn :refer [fsafe]]
+            [utilis.map :refer [compact]]
             [inflections.core :refer [hyphenate underscore]]
             [integrant.core :as ig])
   (:import [com.rethinkdb RethinkDB]
@@ -29,7 +30,7 @@
 
 (defn connect
   [{:keys [db-server db-name]}]
-  (let [{:keys [host port timeout] :or {host "localhost" port 28015 timeout 20}} db-server
+  (let [{:keys [host port timeout] :or {host "localhost" port 28015 timeout 20}} (compact db-server)
         connection (-> r .connection
                        (.hostname host) (.port port) (.timeout 20)
                        (.db db-name)
@@ -104,7 +105,8 @@
                                (.optArg "index" (->rt-name field))))
                 :insert (.insert expr (let [value (first opts)
                                             value (cond-> value (or (map? value) (not (coll? value))) vector)]
-                                        (->> value (map ->rt) into-array)))
+                                        (->> value (map ->rt)
+                                             (into-array clojure.lang.IPersistentMap))))
                 :update (.update expr (->rt (first opts)))
                 :delete (.delete expr)
                 :filter (let [[field value {:keys [default] :or {default false}}] opts]
