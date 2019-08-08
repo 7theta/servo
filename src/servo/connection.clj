@@ -109,15 +109,11 @@
                                              (into-array clojure.lang.IPersistentMap))))
                 :update (.update expr (->rt (first opts)))
                 :delete (.delete expr)
-                :filter (cond
-
-                          (map? (first opts))
+                :filter (if (map? (first opts))
                           (let [[m {:keys [default] :or {default false}}] opts]
                             (-> expr
                                 (.filter (->rt m))
                                 (.optArg "default" default)))
-
-                          :else
                           (let [[field value {:keys [default] :or {default false}}] opts]
                             (-> expr
                                 (.filter (.hashMap r (->rt-name field) value))
