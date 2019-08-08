@@ -116,7 +116,19 @@
                 :between (let [[field lower upper] opts]
                            (-> expr
                                (.between lower upper)
-                               (.optArg "index" (->rt-name field)))))))
+                               (.optArg "index" (->rt-name field))))
+                :order-by (let [[index & [direction]] opts
+                                direction (or direction :asc)]
+                            (-> expr
+                                (.orderBy)
+                                (.optArg "index"
+                                         (if (= direction :asc)
+                                           (.asc r (->rt-name index))
+                                           (.desc r (->rt-name index))))))
+                :count (.count expr)
+                :skip (let [[amount] opts] (.skip expr amount))
+                :limit (let [[amount] opts] (.limit expr amount))
+                :slice (let [[start end] opts] (.slice expr start end)))))
           r expr))
 
 (defn run
@@ -151,7 +163,6 @@
     (future-cancel sub)
     (swap! subscriptions dissoc subscription))
   nil)
-
 
 ;;; Private
 
