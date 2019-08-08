@@ -109,14 +109,31 @@
                                              (into-array clojure.lang.IPersistentMap))))
                 :update (.update expr (->rt (first opts)))
                 :delete (.delete expr)
-                :filter (let [[field value {:keys [default] :or {default false}}] opts]
-                          (-> expr
-                              (.filter (.hashMap r (->rt-name field) value))
-                              (.optArg "default" default)))
+                :filter (if (map? (first opts))
+                          (let [[m {:keys [default] :or {default false}}] opts]
+                            (-> expr
+                                (.filter (->rt m))
+                                (.optArg "default" default)))
+                          (let [[field value {:keys [default] :or {default false}}] opts]
+                            (-> expr
+                                (.filter (.hashMap r (->rt-name field) value))
+                                (.optArg "default" default))))
                 :between (let [[field lower upper] opts]
                            (-> expr
                                (.between lower upper)
-                               (.optArg "index" (->rt-name field)))))))
+                               (.optArg "index" (->rt-name field))))
+                :order-by (let [[index & [direction]] opts
+                                direction (or direction :asc)]
+                            (-> expr
+                                (.orderBy)
+                                (.optArg "index"
+                                         (if (= direction :asc)
+                                           (.asc r (->rt-name index))
+                                           (.desc r (->rt-name index))))))
+                :count (.count expr)
+                :skip (let [[amount] opts] (.skip expr amount))
+                :limit (let [[amount] opts] (.limit expr amount))
+                :slice (let [[start end] opts] (.slice expr start end)))))
           r expr))
 
 (defn run
@@ -151,7 +168,6 @@
     (future-cancel sub)
     (swap! subscriptions dissoc subscription))
   nil)
-
 
 ;;; Private
 
