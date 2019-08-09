@@ -30,9 +30,9 @@
 
 (defn connect
   [{:keys [db-server db-name]}]
-  (let [{:keys [host port timeout] :or {host "localhost" port 28015 timeout 20}} (compact db-server)
+  (let [{:keys [host port timeout] :or {host "localhost" port 28015 timeout 5000}} (compact db-server)
         connection (-> r .connection
-                       (.hostname host) (.port port) (.timeout 20)
+                       (.hostname host) (.port port) (.timeout timeout)
                        (.db db-name)
                        .connect)
         db-connection {:db-server db-server
