@@ -20,7 +20,7 @@
 
 (defonce ^RethinkDB r (RethinkDB/r))
 
-(declare connect disconnect changes ensure-db ->rt-name ->rt rt->)
+(declare compile connect disconnect changes ensure-db ->rt-name ->rt rt->)
 
 (defmethod ig/init-key :servo/connection [_ {:keys [db-server db-name] :as opts}]
   (connect opts))
@@ -88,53 +88,73 @@
   [{:keys [^Connection connection db-name]}]
   (-> r (.uuid) (.run connection)))
 
-(defn compile
+(defn pred
   [expr]
-  (reduce (fn [^ReqlExpr expr [op & opts]]
-            (let [opts (mapv #(cond-> % (vector? %) compile) opts)]
-              (case op
-                :db (.db expr (->rt-name (first opts)))
-                :table (.table expr (->rt-name (first opts)))
-                :changes (.changes expr)
-                :opt-arg (let [[option value] opts]
-                           (.optArg expr (->rt-name option) (cond-> value (keyword? value) name)))
-                :get (.get expr (first opts))
-                :get-all (let [[field value] (cond->> opts (= 1 (count opts)) (cons :id))]
-                           (-> expr
-                               (.getAll (into-array (cond-> value (not (coll? value)) vector)))
-                               (.optArg "index" (->rt-name field))))
-                :insert (.insert expr (let [value (first opts)
-                                            value (cond-> value (or (map? value) (not (coll? value))) vector)]
-                                        (->> value (map ->rt)
-                                             (into-array clojure.lang.IPersistentMap))))
-                :update (.update expr (->rt (first opts)))
-                :delete (.delete expr)
-                :filter (if (map? (first opts))
-                          (let [[m {:keys [default] :or {default false}}] opts]
+  (reify com.rethinkdb.gen.ast.ReqlFunction1
+    (apply [this row]
+      (compile expr row))))
+
+(defn compile
+  ([expr] (compile expr r))
+  ([expr r]
+   (reduce (fn [^ReqlExpr expr [op & opts]]
+             (let [opts (mapv #(cond-> %
+                                 (and (vector? %)
+                                      (not= :pred op)) compile)
+                              opts)]
+               (case op
+                 :db (.db expr (->rt-name (first opts)))
+                 :table (.table expr (->rt-name (first opts)))
+                 :changes (.changes expr)
+                 :opt-arg (let [[option value] opts]
+                            (.optArg expr (->rt-name option) (cond-> value (keyword? value) name)))
+                 :get (.get expr (first opts))
+                 :get-all (let [[field value] (cond->> opts (= 1 (count opts)) (cons :id))]
                             (-> expr
-                                (.filter (->rt m))
-                                (.optArg "default" default)))
-                          (let [[field value {:keys [default] :or {default false}}] opts]
+                                (.getAll (into-array (cond-> value (not (coll? value)) vector)))
+                                (.optArg "index" (->rt-name field))))
+                 :insert (.insert expr (let [value (first opts)
+                                             value (cond-> value (or (map? value) (not (coll? value))) vector)]
+                                         (->> value (map ->rt)
+                                              (into-array clojure.lang.IPersistentMap))))
+                 :update (.update expr (->rt (first opts)))
+                 :delete (.delete expr)
+                 :filter (cond
+
+                           (map? (first opts))
+                           (let [[m {:keys [default] :or {default false}}] opts]
+                             (-> expr
+                                 (.filter (->rt m))
+                                 (.optArg "default" default)))
+
+                           (instance? com.rethinkdb.gen.ast.ReqlFunction1 (first opts))
+                           (.filter expr (first opts))
+
+                           :else
+                           (let [[field value {:keys [default] :or {default false}}] opts]
+                             (-> expr
+                                 (.filter (.hashMap r (->rt-name field) value))
+                                 (.optArg "default" default))))
+                 :between (let [[field lower upper] opts]
                             (-> expr
-                                (.filter (.hashMap r (->rt-name field) value))
-                                (.optArg "default" default))))
-                :between (let [[field lower upper] opts]
-                           (-> expr
-                               (.between lower upper)
-                               (.optArg "index" (->rt-name field))))
-                :order-by (let [[index & [direction]] opts
-                                direction (or direction :asc)]
-                            (-> expr
-                                (.orderBy)
-                                (.optArg "index"
-                                         (if (= direction :asc)
-                                           (.asc r (->rt-name index))
-                                           (.desc r (->rt-name index))))))
-                :count (.count expr)
-                :skip (let [[amount] opts] (.skip expr amount))
-                :limit (let [[amount] opts] (.limit expr amount))
-                :slice (let [[start end] opts] (.slice expr start end)))))
-          r expr))
+                                (.between lower upper)
+                                (.optArg "index" (->rt-name field))))
+                 :order-by (let [[index & [direction]] opts
+                                 direction (or direction :asc)]
+                             (-> expr
+                                 (.orderBy)
+                                 (.optArg "index"
+                                          (if (= direction :asc)
+                                            (.asc r (->rt-name index))
+                                            (.desc r (->rt-name index))))))
+                 :get-field (.getField expr (->rt-name (first opts)))
+                 :contains (.contains expr (first opts))
+                 :pred (pred (first opts))
+                 :count (.count expr)
+                 :skip (.skip expr (first opts))
+                 :limit (.limit expr (first opts))
+                 :slice (let [[start end] opts] (.slice expr start end)))))
+           r expr)))
 
 (defn run
   [{:keys [^Connection connection db-name]} expr]
