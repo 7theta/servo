@@ -15,8 +15,9 @@
             [inflections.core :refer [hyphenate underscore]]
             [integrant.core :as ig])
   (:import [com.rethinkdb RethinkDB]
-           [com.rethinkdb.net Connection]
-           [com.rethinkdb.gen.ast ReqlExpr ReqlFunction1]))
+           [com.rethinkdb.net Connection Cursor]
+           [com.rethinkdb.gen.ast ReqlExpr ReqlFunction1]
+           [java.util Iterator]))
 
 (defonce ^RethinkDB r (RethinkDB/r))
 
@@ -30,9 +31,9 @@
 
 (defn connect
   [{:keys [db-server db-name]}]
-  (let [{:keys [host port timeout] :or {host "localhost" port 28015 timeout 20}} (compact db-server)
+  (let [{:keys [host port timeout] :or {host "localhost" port 28015 timeout 5000}} (compact db-server)
         connection (-> r .connection
-                       (.hostname host) (.port port) (.timeout 20)
+                       (.hostname host) (.port port) (.timeout timeout)
                        (.db db-name)
                        .connect)
         db-connection {:db-server db-server
@@ -74,7 +75,7 @@
       (-> r (.db db-name) (.table table-name)
           (.indexCreate field-name)
           (#(if multi (.optArg % "multi" true) %))
-          (.run connection)))))
+          (#(.run ^ReqlExpr % connection))))))
 
 (defn delete-index
   [{:keys [^Connection connection db-name]} table-name field-name]
@@ -94,7 +95,7 @@
     (apply [this row]
       (compile expr row))))
 
-(defn compile
+(defn ^ReqlExpr compile
   ([expr] (compile expr r))
   ([expr r]
    (reduce (fn [^ReqlExpr expr [op & opts]]
@@ -149,6 +150,7 @@
                                             (.desc r (->rt-name index))))))
                  :get-field (.getField expr (->rt-name (first opts)))
                  :contains (.contains expr (first opts))
+                 :nth (.nth expr (first opts))
                  :pred (pred (first opts))
                  :count (.count expr)
                  :skip (.skip expr (first opts))
@@ -163,7 +165,7 @@
       (or (map? result) (instance? java.util.HashMap result)) (rt-> result)
       (seq? result) (map rt-> result)
       (and (not-any? (partial = :changes) (map first expr))
-           (instance? com.rethinkdb.net.Cursor result)) (map rt-> (.toList result))
+           (instance? Cursor result)) (map rt-> (.toList ^Cursor result))
       :else result)))
 
 (defn subscribe
@@ -176,11 +178,12 @@
                                      (transient {}))
                              persistent!))))
   (changes db-connection expr
-           (fn [{:keys [type new-val old-val] :as change}]
-             (when-not (= type :state)
-               (if (= type :remove)
-                 (swap! value-ref dissoc (:id old-val))
-                 (swap! value-ref assoc (:id new-val) new-val))))))
+           (fn [changes]
+             (swap! value-ref (fn [m]
+                                (reduce (fn [m {:keys [type id value]}]
+                                          (if (= :remove type)
+                                            (dissoc m id)
+                                            (assoc m id value))) m changes))))))
 
 (defn dispose
   [{:keys [subscriptions]} subscription]
@@ -203,15 +206,30 @@
                                         [:opt-arg :squash true]
                                         [:opt-arg :include-types true]
                                         #_[:opt-arg :include-states true]]))]
-                  (loop [changes (.iterator cursor)]
-                    (when-let [change (not-empty
-                                       (-> (rt-> (.next changes))
-                                           (update :type keyword)))]
-                      (callback-fn (if (get-in change [:new-val :deleted])
-                                     {:type :remove
-                                      :new-val nil
-                                      :old-val {:id (get-in change [:new-val :id])}}
-                                     change)))
+                  (loop [changes (.iterator ^Cursor cursor)]
+                    (let [raw-change (.next ^Iterator changes)]
+                      (when-let [change (not-empty
+                                         (-> (rt-> raw-change)
+                                             (update :type keyword)))]
+                        (cond
+                          (get-in change [:new-val :deleted])
+                          (callback-fn [{:type :remove
+                                         :id (get-in change [:new-val :id])}])
+
+                          (=  (:type change) :change)
+                          (callback-fn [{:type :remove
+                                         :id (get-in change [:old-val :id])}
+                                        {:type :add
+                                         :id (get-in change [:new-val :id])
+                                         :value (:new-val change)}])
+
+                          (=  (:type change) :add)
+                          (callback-fn [{:type :add
+                                         :id (get-in change [:new-val :id])
+                                         :value (:new-val change)}])
+
+                          :else
+                          nil)))
                     (recur changes)))
                 (catch Exception e
                   (when-not (= "java.lang.InterruptedException"
