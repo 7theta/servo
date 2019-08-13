@@ -212,24 +212,23 @@
                       (when-let [change (not-empty
                                          (-> (rt-> raw-change)
                                              (update :type keyword)))]
-                        (cond
-                          (get-in change [:new-val :deleted])
+                        (case (:type change)
+                          :remove
                           (callback-fn [{:type :remove
-                                         :id (get-in change [:new-val :id])}])
+                                         :id (get-in change [:old-val :id])}])
 
-                          (=  (:type change) :change)
+                          :change
                           (callback-fn [{:type :remove
                                          :id (get-in change [:old-val :id])}
                                         {:type :add
                                          :id (get-in change [:new-val :id])
                                          :value (:new-val change)}])
 
-                          (=  (:type change) :add)
+                          :add
                           (callback-fn [{:type :add
                                          :id (get-in change [:new-val :id])
                                          :value (:new-val change)}])
 
-                          :else
                           nil)))
                     (recur changes)))
                 (catch Exception e
