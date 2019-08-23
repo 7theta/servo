@@ -171,20 +171,21 @@
 
 (defn subscribe
   [db-connection expr value-ref]
-  (reset! value-ref (let [results (run db-connection expr)]
-                      (if (map? results)
-                        (rt-> results)
-                        (->> results (map rt->)
-                             (reduce (fn [value row] (assoc! value (:id row) row))
-                                     (transient {}))
-                             persistent!))))
-  (changes db-connection expr
-           (fn [changes]
-             (swap! value-ref (fn [m]
-                                (reduce (fn [m {:keys [type id value]}]
-                                          (if (= :remove type)
-                                            (dissoc m id)
-                                            (assoc m id value))) m changes))))))
+  (let [single-value (some (partial = :get) (map first expr))]
+    (reset! value-ref (let [results (run db-connection expr)]
+                        (if (map? results)
+                          (rt-> results)
+                          (->> results (map rt->)
+                               (reduce (fn [value row] (assoc! value (:id row) row))
+                                       (transient {}))
+                               persistent!))))
+    (changes db-connection expr
+             (fn [changes]
+               (swap! value-ref (fn [m]
+                                  (reduce (fn [m {:keys [type id value]}]
+                                            (if (= :remove type)
+                                              (if single-value {} (dissoc m id))
+                                              (if single-value value (assoc m id value)))) m changes)))))))
 
 (defn dispose
   [{:keys [subscriptions]} subscription]
