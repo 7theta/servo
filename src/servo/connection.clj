@@ -55,6 +55,11 @@
     (when-not ((set (-> r .dbList (.run connection))) db-name)
       (-> r (.dbCreate db-name) (.run connection)))))
 
+(defn table-exists?
+  [{:keys [^Connection connection db-name]} table-name]
+  (let [table-name (->rt-name table-name)]
+    (boolean ((set (-> r (.db db-name) .tableList (.run connection))) table-name))))
+
 (defn ensure-table
   [{:keys [^Connection connection db-name]} table-name]
   (let [table-name (->rt-name table-name)]
@@ -149,6 +154,8 @@
                                             (.asc r (->rt-name index))
                                             (.desc r (->rt-name index))))))
                  :get-field (.getField expr (->rt-name (first opts)))
+                 :pluck (.pluck expr (into-array (map ->rt-name opts)))
+                 :without (.without expr (into-array (map ->rt-name opts)))
                  :contains (.contains expr (first opts))
                  :nth (.nth expr (first opts))
                  :pred (pred (first opts))
