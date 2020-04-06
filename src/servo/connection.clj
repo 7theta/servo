@@ -15,7 +15,7 @@
             [inflections.core :refer [hyphenate underscore]]
             [integrant.core :as ig])
   (:import [com.rethinkdb RethinkDB]
-           [com.rethinkdb.net Connection Cursor]
+           [com.rethinkdb.net Connection Result]
            [com.rethinkdb.gen.ast ReqlExpr ReqlFunction1]
            [java.util Iterator]))
 
@@ -33,7 +33,7 @@
   [{:keys [db-server db-name]}]
   (let [{:keys [host port timeout] :or {host "localhost" port 28015 timeout 5000}} (compact db-server)
         connection (-> r .connection
-                       (.hostname host) (.port port) (.timeout timeout)
+                       (.hostname host) (.port (int port)) (.timeout timeout)
                        (.db db-name)
                        .connect)
         db-connection {:db-server db-server
@@ -52,7 +52,7 @@
 (defn ensure-db
   [{:keys [^Connection connection db-name]} db-name]
   (let [db-name (->rt-name db-name)]
-    (when-not ((set (-> r .dbList (.run connection))) db-name)
+    (when-not ((set (first (-> r .dbList (.run connection)))) db-name)
       (-> r (.dbCreate db-name) (.run connection)))))
 
 (defn table-exists?
@@ -63,7 +63,8 @@
 (defn ensure-table
   [{:keys [^Connection connection db-name]} table-name]
   (let [table-name (->rt-name table-name)]
-    (when-not ((set (-> r (.db db-name) .tableList (.run connection))) table-name)
+    (when-not ((set (first (-> r (.db db-name) .tableList (.run connection))))
+               table-name)
       (-> r (.db db-name) (.tableCreate table-name) (.run connection)))))
 
 (defn delete-table
@@ -75,8 +76,8 @@
   [{:keys [^Connection connection db-name]} table-name field-name & {:keys [multi]}]
   (let [table-name (->rt-name table-name)
         field-name (->rt-name field-name)]
-    (when-not ((set (-> r (.db db-name) (.table table-name)
-                        .indexList (.run connection))) field-name)
+    (when-not ((set (first (-> r (.db db-name) (.table table-name)
+                               .indexList (.run connection)))) field-name)
       (-> r (.db db-name) (.table table-name)
           (.indexCreate field-name)
           (#(if multi (.optArg % "multi" true) %))
@@ -170,10 +171,10 @@
   [{:keys [^Connection connection db-name]} expr]
   (let [result (.run (compile expr) connection)]
     (cond
-      (or (map? result) (instance? java.util.HashMap result)) (rt-> result)
+      (->> expr (map first) set :get) (-> result first rt->)
       (seq? result) (map rt-> result)
       (and (not-any? (partial = :changes) (map first expr))
-           (instance? Cursor result)) (map rt-> (.toList ^Cursor result))
+           (instance? Result result)) (map rt-> (.toList ^Result result))
       :else result)))
 
 (defn subscribe
@@ -215,7 +216,7 @@
                                         [:opt-arg :squash true]
                                         [:opt-arg :include-types true]
                                         #_[:opt-arg :include-states true]]))]
-                  (loop [changes (.iterator ^Cursor cursor)]
+                  (loop [changes (.iterator ^Result cursor)]
                     (let [raw-change (.next ^Iterator changes)]
                       (when-let [change (not-empty
                                          (-> (rt-> raw-change)
@@ -284,12 +285,13 @@
 
 (defn- rt->
   [m]
-  (xform-map m
-             (fn [k] (keyword (hyphenate k)))
-             (fn [v]
-               (cond
-                 (and (or (instance? java.util.ArrayList v)
-                          (vector? v)) (= "servo/kw" (first v)))
-                 (keyword (second v))
+  (not-empty
+   (xform-map m
+              (fn [k] (keyword (hyphenate k)))
+              (fn [v]
+                (cond
+                  (and (or (instance? java.util.ArrayList v)
+                           (vector? v)) (= "servo/kw" (first v)))
+                  (keyword (second v))
 
-                 :else v))))
+                  :else v)))))
