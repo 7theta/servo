@@ -175,7 +175,7 @@
       (->> expr (map first) set :get) (-> result first rt->)
       (seq? result) (map rt-> result)
       (and (not-any? (partial = :changes) (map first expr))
-           (instance? Result result)) (let [result ^Result result]
+           (instance? Result result)) (let [^Result result result]
                                         (if (= (.responseType result) ResponseType/SUCCESS_ATOM)
                                           (.single result)
                                           (map rt-> (.toList  result))))
