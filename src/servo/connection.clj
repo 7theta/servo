@@ -17,6 +17,7 @@
   (:import [com.rethinkdb RethinkDB]
            [com.rethinkdb.net Connection Result]
            [com.rethinkdb.gen.ast ReqlExpr ReqlFunction1]
+           [com.rethinkdb.gen.proto ResponseType]
            [java.util Iterator]))
 
 (defonce ^RethinkDB r (RethinkDB/r))
@@ -174,7 +175,10 @@
       (->> expr (map first) set :get) (-> result first rt->)
       (seq? result) (map rt-> result)
       (and (not-any? (partial = :changes) (map first expr))
-           (instance? Result result)) (map rt-> (.toList ^Result result))
+           (instance? Result result)) (let [^Result result result]
+                                        (if (= (.responseType result) ResponseType/SUCCESS_ATOM)
+                                          (.single result)
+                                          (map rt-> (.toList  result))))
       :else result)))
 
 (defn subscribe
