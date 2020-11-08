@@ -10,14 +10,17 @@
 
 (ns servo.connection
   (:refer-clojure :exclude [compile])
-  (:require [utilis.fn :refer [fsafe]]
+  (:require [tempus.core :as t]
+            [utilis.fn :refer [fsafe]]
             [utilis.map :refer [compact]]
             [inflections.core :refer [hyphenate underscore]]
             [integrant.core :as ig])
-  (:import [com.rethinkdb RethinkDB]
+  (:import [tempus.core DateTime]
+           [com.rethinkdb RethinkDB]
            [com.rethinkdb.net Connection Result]
            [com.rethinkdb.gen.ast ReqlExpr ReqlFunction1]
            [com.rethinkdb.gen.proto ResponseType]
+           [java.time OffsetDateTime]
            [java.util Iterator]))
 
 (defonce ^RethinkDB r (RethinkDB/r))
@@ -263,6 +266,9 @@
   (into {} (map (fn [[k v]]
                   [(kf k)
                    (cond
+                     (instance? DateTime v)
+                     (vf v)
+
                      (or (instance? java.util.HashMap v)
                          (map? v))
                      (xform-map v kf vf)
@@ -285,6 +291,9 @@
                  (keyword? v)
                  ["servo/kw" (name v)]
 
+                 (instance? DateTime v)
+                 (t/into :native v)
+
                  :else v))))
 
 (defn- rt->
@@ -298,4 +307,6 @@
                            (vector? v)) (= "servo/kw" (first v)))
                   (keyword (second v))
 
+                  (instance? OffsetDateTime v)
+                  (t/from :native v)
                   :else v)))))
