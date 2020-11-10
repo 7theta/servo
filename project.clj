@@ -8,13 +8,14 @@
 ;;   the terms of this license.
 ;;   You must not remove this notice, or any others, from this software.
 
-(defproject com.7theta/servo "1.4.1"
+(defproject com.7theta/servo "1.4.2"
   :description "A rehinkdb client library designed to integrate with signum"
   :url "https://github.com/7theta/servo"
   :license {:name "Eclipse Public License"
             :url "http://www.eclipse.org/legal/epl-v10.html"}
   :dependencies [[org.clojure/clojure "1.10.1"]
-                 [com.7theta/via "4.1.0"]
+                 [com.7theta/via "6.2.0"]
+                 [com.7theta/tempus "0.1.0"]
 
                  [com.rethinkdb/rethinkdb-driver "2.4.2"]
                  [inflections "0.13.2"]
