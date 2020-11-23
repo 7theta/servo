@@ -175,7 +175,6 @@
 (defn run
   [{:keys [^Connection connection db-name]} expr]
   (let [result (.run (compile expr) connection)]
-    (println "RUN" (class result) result)
     (cond
       (->> expr (map first) set :get) (-> result first rt->)
       (seq? result) (map rt-> result)
