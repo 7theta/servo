@@ -176,22 +176,20 @@
   [{:keys [^Connection connection db-name]} expr]
   (let [result (.run (compile expr) connection)]
     (cond
-      (->> expr (map first) set :get) (-> result first rt->)
-      (seq? result) (map rt-> result)
-      (and (not-any? (partial = :changes) (map first expr))
-           (instance? Result result)) (let [^Result result result]
-                                        (if (= (.responseType result) ResponseType/SUCCESS_ATOM)
-                                          (rt-> (.single result))
-                                          (map rt-> (.toList result))))
-      :else (rt-> result))))
+      (and (instance? Result result)
+           (= (.responseType result) ResponseType/SUCCESS_PARTIAL)) result
+      (and (instance? Result result)
+           (= (.responseType result) ResponseType/SUCCESS_ATOM)) (rt-> (.single ^Result result))
+      (and (instance? Result result)) (map rt-> (.toList ^Result result))
+      :else result)))
 
 (defn subscribe
   [db-connection expr value-ref]
   (let [single-value (some (partial = :get) (map first expr))]
     (reset! value-ref (let [results (run db-connection expr)]
                         (if (map? results)
-                          (rt-> results)
-                          (->> results (map rt->)
+                          results
+                          (->> results
                                (reduce (fn [value row] (assoc! value (:id row) row))
                                        (transient {}))
                                persistent!))))
@@ -217,6 +215,7 @@
   (let [sub-id (str (java.util.UUID/randomUUID))
         sub (future
               (try
+
                 (let [cursor (run db-connection
                                (concat expr
                                        [[:changes]
@@ -267,13 +266,16 @@
                      (xform-map v kf vf)
 
                      (or (instance? java.util.List v) (coll? v))
-                     (mapv #(if (or (map? %) (instance? java.util.Map %)) (xform-map % kf vf) %) v)
+                     (mapv #(if (or (map? %) (instance? java.util.Map %)) (xform-map % kf vf) (vf %)) v)
 
                      :else (vf v))]) m)))
 
 (defn- ->rt-name
   [s]
-  (underscore (name s)))
+  (str (if (keyword? s)
+         (when-let [ns (namespace s)]
+           (str ns "/")))
+       (underscore (name s))))
 
 (defn- ->rt-key
   [k]
@@ -287,8 +289,9 @@
 (defn- ->rt-value
   [v]
   (cond
-    (keyword? v) (str "servo/keyword=" (name v))
+    (keyword? v) (str "servo/keyword=" (->rt-name v))
     (instance? DateTime v) (t/into :native v)
+    (seq? v) (map ->rt-value v)
     :else v))
 
 (defn- ->rt
