@@ -271,10 +271,9 @@
 
 (defn- ->rt-name
   [s]
-  (str (if (keyword? s)
-         (when-let [ns (namespace s)]
-           (str ns "/")))
-       (underscore (name s))))
+  (underscore
+   (str (when (keyword? s) (when-let [ns (namespace s)] (str ns "/")))
+        (name s))))
 
 (defn- ->rt-key
   [k]
@@ -303,7 +302,7 @@
         [_ type-fn value-str] (re-find #"^servo/(.*)=(.*)$" s)]
     (if (and type-fn value-str)
       ((case type-fn
-         "keyword" keyword
+         "keyword" (comp keyword hyphenate)
          "str" str
          "double" string->double
          "long" string->long) value-str)
