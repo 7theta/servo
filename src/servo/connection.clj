@@ -215,7 +215,6 @@
   (let [sub-id (str (java.util.UUID/randomUUID))
         sub (future
               (try
-
                 (let [cursor (run db-connection
                                (concat expr
                                        [[:changes]
