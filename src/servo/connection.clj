@@ -160,6 +160,7 @@
                                             (.desc r (->rt-name index))))))
                  :get-field (.getField expr (->rt-name (first opts)))
                  :pluck (.pluck expr (into-array (map ->rt-name opts)))
+                 :with-fields (.withFields expr (into-array (map ->rt-name opts)))
                  :without (.without expr (into-array (map ->rt-name opts)))
                  :contains (.contains expr (first opts))
                  :nth (.nth expr (first opts))
@@ -181,7 +182,7 @@
            (instance? Result result)) (let [^Result result result]
                                         (if (= (.responseType result) ResponseType/SUCCESS_ATOM)
                                           (.single result)
-                                          (map rt-> (.toList  result))))
+                                          (map rt-> (.toList result))))
       :else result)))
 
 (defn subscribe
@@ -252,7 +253,7 @@
                                (-> e Throwable->map :via first :message))
                     (println "Error (" (pr-str expr) "):"
                              (pr-str (Throwable->map e)))
-                    (println (.printStackTrace e))
+                    (.printStackTrace e)
                     (swap! (:subscriptions db-connection) dissoc sub-id)))))]
     (swap! (:subscriptions db-connection) assoc sub-id sub)
     sub-id))
@@ -260,6 +261,10 @@
 (defn- ->rt-name
   [s]
   (underscore (name s)))
+
+(defn- rt-map?
+  [v]
+  (or (instance? java.util.HashMap v) (map? v)))
 
 (defn- xform-map
   [m kf vf]
@@ -269,8 +274,7 @@
                      (instance? DateTime v)
                      (vf v)
 
-                     (or (instance? java.util.HashMap v)
-                         (map? v))
+                     (rt-map? v)
                      (xform-map v kf vf)
 
                      (and (or (instance? java.util.ArrayList v)
@@ -278,9 +282,10 @@
                           (not (and (string? (first v))
                                     (re-find #"^servo/.*$" (first v))))
                           (not (keyword? (first v))))
-                     (mapv #(if (map? %) (xform-map % kf vf) %) v)
+                     (mapv #(if (rt-map? %) (xform-map % kf vf) %) v)
 
-                     :else (vf v))]) m)))
+                     :else (vf v))])
+                m)))
 
 (defn- ->rt
   [m]
@@ -298,15 +303,22 @@
 
 (defn- rt->
   [m]
-  (not-empty
-   (xform-map m
-              (fn [k] (keyword (hyphenate k)))
-              (fn [v]
-                (cond
-                  (and (or (instance? java.util.ArrayList v)
-                           (vector? v)) (= "servo/kw" (first v)))
-                  (keyword (second v))
+  (cond
+    (rt-map? m)
+    (not-empty
+     (xform-map m
+                (fn [k] (keyword (hyphenate k)))
+                (fn [v]
+                  (cond
+                    (and (or (instance? java.util.ArrayList v)
+                             (vector? v)) (= "servo/kw" (first v)))
+                    (keyword (second v))
 
-                  (instance? OffsetDateTime v)
-                  (t/from :native v)
-                  :else v)))))
+                    (instance? OffsetDateTime v)
+                    (t/from :native v)
+                    :else v))))
+
+    (or (instance? java.util.ArrayList m) (coll? m))
+    (mapv rt-> m)
+
+    :else (throw (ex-info "Unable to convert rethinkdb data structure." {:data m}))))
