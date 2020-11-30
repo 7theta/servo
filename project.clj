@@ -8,7 +8,7 @@
 ;;   the terms of this license.
 ;;   You must not remove this notice, or any others, from this software.
 
-(defproject com.7theta/servo "1.4.2"
+(defproject com.7theta/servo "1.4.3"
   :description "A rehinkdb client library designed to integrate with signum"
   :url "https://github.com/7theta/servo"
   :license {:name "Eclipse Public License"
