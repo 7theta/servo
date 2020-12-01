@@ -13,6 +13,7 @@
   (:require [tempus.core :as t]
             [utilis.fn :refer [fsafe]]
             [utilis.map :refer [compact]]
+            [utilis.types.number :refer [string->long string->double]]
             [inflections.core :refer [hyphenate underscore]]
             [integrant.core :as ig])
   (:import [tempus.core DateTime]
@@ -176,13 +177,11 @@
   [{:keys [^Connection connection db-name]} expr]
   (let [result (.run (compile expr) connection)]
     (cond
-      (->> expr (map first) set :get) (-> result first rt->)
-      (seq? result) (map rt-> result)
-      (and (not-any? (partial = :changes) (map first expr))
-           (instance? Result result)) (let [^Result result result]
-                                        (if (= (.responseType result) ResponseType/SUCCESS_ATOM)
-                                          (.single result)
-                                          (map rt-> (.toList result))))
+      (and (instance? Result result)
+           (= (.responseType result) ResponseType/SUCCESS_PARTIAL)) result
+      (and (instance? Result result)
+           (= (.responseType result) ResponseType/SUCCESS_ATOM)) (rt-> (.single ^Result result))
+      (and (instance? Result result)) (map rt-> (.toList ^Result result))
       :else result)))
 
 (defn subscribe
@@ -190,8 +189,8 @@
   (let [single-value (some (partial = :get) (map first expr))]
     (reset! value-ref (let [results (run db-connection expr)]
                         (if (map? results)
-                          (rt-> results)
-                          (->> results (map rt->)
+                          results
+                          (->> results
                                (reduce (fn [value row] (assoc! value (:id row) row))
                                        (transient {}))
                                persistent!))))
@@ -253,72 +252,80 @@
                                (-> e Throwable->map :via first :message))
                     (println "Error (" (pr-str expr) "):"
                              (pr-str (Throwable->map e)))
-                    (.printStackTrace e)
+                    (println (.printStackTrace e))
                     (swap! (:subscriptions db-connection) dissoc sub-id)))))]
     (swap! (:subscriptions db-connection) assoc sub-id sub)
     sub-id))
-
-(defn- ->rt-name
-  [s]
-  (underscore (name s)))
-
-(defn- rt-map?
-  [v]
-  (or (instance? java.util.HashMap v) (map? v)))
 
 (defn- xform-map
   [m kf vf]
   (into {} (map (fn [[k v]]
                   [(kf k)
                    (cond
-                     (instance? DateTime v)
-                     (vf v)
-
-                     (rt-map? v)
+                     (or (instance? java.util.Map v) (map? v))
                      (xform-map v kf vf)
 
-                     (and (or (instance? java.util.ArrayList v)
-                              (coll? v))
-                          (not (and (string? (first v))
-                                    (re-find #"^servo/.*$" (first v))))
-                          (not (keyword? (first v))))
-                     (mapv #(if (rt-map? %) (xform-map % kf vf) %) v)
+                     (or (instance? java.util.List v) (coll? v))
+                     (mapv #(if (or (map? %) (instance? java.util.Map %)) (xform-map % kf vf) (vf %)) v)
 
-                     :else (vf v))])
-                m)))
+                     :else (vf v))]) m)))
+
+(defn- ->rt-name
+  [s]
+  (underscore
+   (str (when (keyword? s) (when-let [ns (namespace s)] (str ns "/")))
+        (name s))))
+
+(defn- ->rt-key
+  [k]
+  (cond
+    (keyword? k) (->rt-name k)
+    (string? k) (str "servo/str=" (->rt-name k))
+    (double? k) (str "servo/double=" (str k))
+    (int? k) (str "servo/long=" (str k))
+    :else (throw (ex-info "Unsupported type for key" {:key k}))))
+
+(defn- ->rt-value
+  [v]
+  (cond
+    (keyword? v) (str "servo/keyword=" (->rt-name v))
+    (instance? DateTime v) (t/into :native v)
+    (seq? v) (map ->rt-value v)
+    :else v))
 
 (defn- ->rt
   [m]
-  (xform-map m
-             (fn [k] (->rt-name  k))
-             (fn [v]
-               (cond
-                 (keyword? v)
-                 ["servo/kw" (name v)]
+  (xform-map m ->rt-key ->rt-value))
 
-                 (instance? DateTime v)
-                 (t/into :native v)
+(defn- rt-string->
+  [s]
+  (let [long string->long
+        [_ type-fn value-str] (re-find #"^servo/(.*)=(.*)$" s)]
+    (if (and type-fn value-str)
+      ((case type-fn
+         "keyword" (comp keyword hyphenate)
+         "str" str
+         "double" string->double
+         "long" string->long) value-str)
+      s)))
 
-                 :else v))))
+(defn- rt-key->
+  [k]
+  (let [coerced (rt-string-> k)]
+    (if (= k coerced)
+      (keyword (hyphenate k))
+      coerced)))
+
+(defn- rt-value->
+  [v]
+  (cond
+    (string? v) (rt-string-> v)
+    (instance? OffsetDateTime v) (t/from :native v)
+    (and (or (instance? java.util.List v) (coll? v))
+         (string? (first v))
+         (re-find #"^servo/.*$" (first v))) (keyword (second v))
+    :else v))
 
 (defn- rt->
   [m]
-  (cond
-    (rt-map? m)
-    (not-empty
-     (xform-map m
-                (fn [k] (keyword (hyphenate k)))
-                (fn [v]
-                  (cond
-                    (and (or (instance? java.util.ArrayList v)
-                             (vector? v)) (= "servo/kw" (first v)))
-                    (keyword (second v))
-
-                    (instance? OffsetDateTime v)
-                    (t/from :native v)
-                    :else v))))
-
-    (or (instance? java.util.ArrayList m) (coll? m))
-    (mapv rt-> m)
-
-    :else (throw (ex-info "Unable to convert rethinkdb data structure." {:data m}))))
+  (not-empty (xform-map m rt-key-> rt-value->)))
