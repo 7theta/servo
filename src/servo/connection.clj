@@ -161,6 +161,7 @@
                                             (.desc r (->rt-name index))))))
                  :get-field (.getField expr (->rt-name (first opts)))
                  :pluck (.pluck expr (into-array (map ->rt-name opts)))
+                 :with-fields (.withFields expr (into-array (map ->rt-name opts)))
                  :without (.without expr (into-array (map ->rt-name opts)))
                  :contains (.contains expr (first opts))
                  :nth (.nth expr (first opts))
