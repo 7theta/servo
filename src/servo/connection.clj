@@ -98,7 +98,7 @@
 
 (defn uuid
   [{:keys [^Connection connection db-name]}]
-  (-> r (.uuid) (.run connection)))
+  (-> r (.uuid) (.run connection) (.single)))
 
 (defn pred
   [expr]
