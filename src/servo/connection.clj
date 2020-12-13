@@ -261,14 +261,17 @@
   [m kf vf]
   (into {} (map (fn [[k v]]
                   [(kf k)
-                   (cond
-                     (or (instance? java.util.Map v) (map? v))
-                     (xform-map v kf vf)
-
-                     (or (instance? java.util.List v) (coll? v))
-                     (mapv #(if (or (map? %) (instance? java.util.Map %)) (xform-map % kf vf) (vf %)) v)
-
-                     :else (vf v))]) m)))
+                   (let [[value handled?] (vf v)]
+                     (if-not handled?
+                       (cond
+                         (or (instance? java.util.Map v) (map? v))
+                         (xform-map v kf vf)
+                         (or (instance? java.util.List v) (coll? v))
+                         (mapv #(if (or (map? %) (instance? java.util.Map %))
+                                  (xform-map % kf vf)
+                                  (vf %)) v)
+                         :else v)
+                       value))]) m)))
 
 (defn- ->rt-name
   [s]
@@ -288,10 +291,10 @@
 (defn- ->rt-value
   [v]
   (cond
-    (keyword? v) (str "servo/keyword=" (->rt-name v))
-    (instance? DateTime v) (t/into :native v)
-    (seq? v) (map ->rt-value v)
-    :else v))
+    (keyword? v) [(str "servo/keyword=" (->rt-name v)) true]
+    (instance? DateTime v) [(t/into :native v) true]
+    (seq? v) [(map ->rt-value v) true]
+    :else [v false]))
 
 (defn- ->rt
   [m]
@@ -319,12 +322,12 @@
 (defn- rt-value->
   [v]
   (cond
-    (string? v) (rt-string-> v)
-    (instance? OffsetDateTime v) (t/from :native v)
+    (string? v) [(rt-string-> v) true]
+    (instance? OffsetDateTime v) [(t/from :native v) true]
     (and (or (instance? java.util.List v) (coll? v))
          (string? (first v))
-         (re-find #"^servo/.*$" (first v))) (keyword (second v))
-    :else v))
+         (re-find #"^servo/.*$" (first v))) [(keyword (second v)) true]
+    :else [v false]))
 
 (defn- rt->
   [m]

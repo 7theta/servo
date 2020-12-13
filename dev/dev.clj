@@ -28,7 +28,7 @@
 (def config
   {:servo/connection
    {:db-server {:host "localhost" :port 28015}
-    :db-name "servo"}
+    :db-name "test"}
 
    :servo/subs
    {:db-connection (ig/ref :servo/connection)}
@@ -38,7 +38,6 @@
 
 (ig/load-namespaces config)
 (igr/set-prep! (constantly config))
-
 
 (def dbc (atom nil))
 
