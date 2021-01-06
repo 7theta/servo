@@ -15,7 +15,8 @@
             [utilis.map :refer [compact]]
             [utilis.types.number :refer [string->long string->double]]
             [inflections.core :refer [hyphenate underscore]]
-            [integrant.core :as ig])
+            [integrant.core :as ig]
+            [clojure.core.protocols :refer [IKVReduce]])
   (:import [tempus.core DateTime]
            [com.rethinkdb RethinkDB]
            [com.rethinkdb.net Connection Result]
@@ -173,24 +174,23 @@
                  :slice (let [[start end] opts] (.slice expr start end)))))
            r expr)))
 
+(declare run->result)
+
 (defn run
-  [{:keys [^Connection connection db-name]} expr]
-  (let [result (.run (compile expr) connection)]
+  [connection expr]
+  (let [result (run->result connection expr)]
     (cond
       (and (instance? Result result)
-           (= (.responseType result) ResponseType/SUCCESS_PARTIAL)) result
-      (and (instance? Result result)
-           (= (.responseType result) ResponseType/SUCCESS_ATOM)) (rt-> (.single ^Result result))
-      (and (instance? Result result)) (map rt-> (.toList ^Result result))
-      :else result)))
+           (= (.responseType ^Result result) ResponseType/SUCCESS_ATOM)) (rt-> (.single ^Result result))
+      (and (instance? Result result)) (map rt-> (.toList ^Result result)))))
 
 (defn subscribe
   [db-connection expr value-ref]
   (let [single-value (some (partial = :get) (map first expr))]
-    (reset! value-ref (let [results (run db-connection expr)]
-                        (if (map? results)
-                          results
-                          (->> results
+    (reset! value-ref (let [result (run db-connection expr)]
+                        (if (map? result)
+                          result
+                          (->> result
                                (reduce (fn [value row] (assoc! value (:id row) row))
                                        (transient {}))
                                persistent!))))
@@ -211,18 +211,36 @@
 
 ;;; Private
 
+(defn- run->result
+  [{:keys [^Connection connection db-name]} expr]
+  (.run (compile expr) connection))
+
+(extend-protocol IKVReduce
+  java.util.Map
+  (kv-reduce
+    [amap f init]
+    (let [^java.util.Iterator iter (.. amap entrySet iterator)]
+      (loop [ret init]
+        (if (.hasNext iter)
+          (let [^java.util.Map$Entry kv (.next iter)
+                ret (f ret (.getKey kv) (.getValue kv))]
+            (if (reduced? ret)
+              @ret
+              (recur ret)))
+          ret)))))
+
 (defn- changes
   [db-connection expr callback-fn]
   (let [sub-id (str (java.util.UUID/randomUUID))
         sub (future
               (try
-                (let [cursor (run db-connection
-                               (concat expr
-                                       [[:changes]
-                                        #_[:opt-arg :include-initial true]
-                                        [:opt-arg :squash true]
-                                        [:opt-arg :include-types true]
-                                        #_[:opt-arg :include-states true]]))]
+                (let [cursor (run->result db-connection
+                                          (concat expr
+                                                  [[:changes]
+                                                   #_[:opt-arg :include-initial true]
+                                                   [:opt-arg :squash true]
+                                                   [:opt-arg :include-types true]
+                                                   #_[:opt-arg :include-states true]]))]
                   (loop [changes (.iterator ^Result cursor)]
                     (let [raw-change (.next ^Iterator changes)]
                       (when-let [change (not-empty
@@ -269,7 +287,7 @@
                          (or (instance? java.util.List v) (coll? v))
                          (mapv #(if (or (map? %) (instance? java.util.Map %))
                                   (xform-map % kf vf)
-                                  (vf %)) v)
+                                  (first (vf %))) v)
                          :else v)
                        value))]) m)))
 
@@ -293,7 +311,6 @@
   (cond
     (keyword? v) [(str "servo/keyword=" (->rt-name v)) true]
     (instance? DateTime v) [(t/into :native v) true]
-    (seq? v) [(map ->rt-value v) true]
     :else [v false]))
 
 (defn- ->rt
