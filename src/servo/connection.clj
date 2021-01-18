@@ -33,7 +33,7 @@
   (connect opts))
 
 (defmethod ig/halt-key! :servo/connection [_ connection]
-  (disconnect connection))
+  (try (disconnect connection) (catch Exception _ nil)))
 
 (defn connect
   [{:keys [db-server db-name]}]
@@ -343,9 +343,11 @@
     (instance? OffsetDateTime v) [(t/from :native v) true]
     (and (or (instance? java.util.List v) (coll? v))
          (string? (first v))
-         (re-find #"^servo/.*$" (first v))) [(keyword (second v)) true]
+         (re-find #"^servo/keyword$" (first v))) [(keyword (second v)) true]
     :else [v false]))
 
 (defn- rt->
   [m]
-  (not-empty (xform-map m rt-key-> rt-value->)))
+  (if (or (map? m) (instance? java.util.Map m))
+    (not-empty (xform-map m rt-key-> rt-value->))
+    (first (rt-value-> m))))
