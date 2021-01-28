@@ -27,7 +27,7 @@
 
 (defonce ^RethinkDB r (RethinkDB/r))
 
-(declare compile connect disconnect changes ensure-db ->rt-name ->rt rt->)
+(declare compile connect disconnect changes ensure-db ->rt-name ->rt-value ->rt rt->)
 
 (defmethod ig/init-key :servo/connection [_ {:keys [db-server db-name] :as opts}]
   (connect opts))
@@ -121,7 +121,7 @@
                  :changes (.changes expr)
                  :opt-arg (let [[option value] opts]
                             (.optArg expr (->rt-name option) (cond-> value (keyword? value) name)))
-                 :get (.get expr (first opts))
+                 :get (.get expr (first (->rt-value (first opts))))
                  :get-all (let [[field value] (cond->> opts (= 1 (count opts)) (cons :id))]
                             (-> expr
                                 (.getAll (into-array (cond-> value (not (coll? value)) vector)))
