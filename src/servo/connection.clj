@@ -38,17 +38,18 @@
 (defn connect
   [{:keys [db-server db-name]}]
   (let [{:keys [host port timeout] :or {host "localhost" port 28015 timeout 5000}} (compact db-server)
+        db-name (->rt-name db-name)
         connection (-> r .connection
                        (.hostname host)
                        (.port (int port))
                        (.timeout timeout)
-                       (.db (->rt-name db-name))
+                       (.db db-name)
                        .connect)
         db-connection {:db-server db-server
                        :db-name db-name
                        :connection connection
                        :subscriptions (atom {})}]
-    (ensure-db db-connection db-name)
+    (ensure-db db-connection)
     db-connection))
 
 (defn disconnect
@@ -57,36 +58,26 @@
   (.close connection)
   nil)
 
-(defn ensure-db
-  [{:keys [^Connection connection db-name]} db-name]
-  (let [db-name (->rt-name db-name)]
-    (when-not ((set (first (-> r .dbList (.run connection)))) db-name)
-      (-> r (.dbCreate db-name) (.run connection)))))
-
 (defn table-exists?
   [{:keys [^Connection connection db-name]} table-name]
-  (let [db-name (->rt-name db-name)
-        table-name (->rt-name table-name)]
+  (let [table-name (->rt-name table-name)]
     (boolean ((set (-> r (.db db-name) .tableList (.run connection))) table-name))))
 
 (defn ensure-table
   [{:keys [^Connection connection db-name]} table-name]
-  (let [db-name (->rt-name db-name)
-        table-name (->rt-name table-name)]
+  (let [table-name (->rt-name table-name)]
     (when-not ((set (first (-> r (.db db-name) .tableList (.run connection))))
                table-name)
       (-> r (.db db-name) (.tableCreate table-name) (.run connection)))))
 
 (defn delete-table
   [{:keys [^Connection connection db-name]} table-name]
-  (let [db-name (->rt-name db-name)
-        table-name (->rt-name table-name)]
+  (let [table-name (->rt-name table-name)]
     (-> r (.db db-name) (.tableDrop table-name) (.run connection))))
 
 (defn ensure-index
   [{:keys [^Connection connection db-name]} table-name field-name & {:keys [multi]}]
-  (let [db-name (->rt-name db-name)
-        table-name (->rt-name table-name)
+  (let [table-name (->rt-name table-name)
         field-name (->rt-name field-name)]
     (when-not ((set (first (-> r (.db db-name) (.table table-name)
                                .indexList (.run connection)))) field-name)
@@ -97,8 +88,7 @@
 
 (defn delete-index
   [{:keys [^Connection connection db-name]} table-name field-name]
-  (let [db-name (->rt-name db-name)
-        table-name (->rt-name table-name)
+  (let [table-name (->rt-name table-name)
         field-name (->rt-name field-name)]
     (-> r (.db db-name) (.table table-name)
         (.indexDrop field-name)
@@ -217,6 +207,11 @@
   nil)
 
 ;;; Private
+
+(defn- ensure-db
+  [{:keys [^Connection connection db-name]}]
+  (when-not ((set (first (-> r .dbList (.run connection)))) db-name)
+      (-> r (.dbCreate db-name) (.run connection))))
 
 (defn- run->result
   [{:keys [^Connection connection db-name]} expr]
