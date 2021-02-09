@@ -39,8 +39,10 @@
   [{:keys [db-server db-name]}]
   (let [{:keys [host port timeout] :or {host "localhost" port 28015 timeout 5000}} (compact db-server)
         connection (-> r .connection
-                       (.hostname host) (.port (int port)) (.timeout timeout)
-                       (.db db-name)
+                       (.hostname host)
+                       (.port (int port))
+                       (.timeout timeout)
+                       (.db (->rt-name db-name))
                        .connect)
         db-connection {:db-server db-server
                        :db-name db-name
@@ -63,24 +65,28 @@
 
 (defn table-exists?
   [{:keys [^Connection connection db-name]} table-name]
-  (let [table-name (->rt-name table-name)]
+  (let [db-name (->rt-name db-name)
+        table-name (->rt-name table-name)]
     (boolean ((set (-> r (.db db-name) .tableList (.run connection))) table-name))))
 
 (defn ensure-table
   [{:keys [^Connection connection db-name]} table-name]
-  (let [table-name (->rt-name table-name)]
+  (let [db-name (->rt-name db-name)
+        table-name (->rt-name table-name)]
     (when-not ((set (first (-> r (.db db-name) .tableList (.run connection))))
                table-name)
       (-> r (.db db-name) (.tableCreate table-name) (.run connection)))))
 
 (defn delete-table
   [{:keys [^Connection connection db-name]} table-name]
-  (let [table-name (->rt-name table-name)]
+  (let [db-name (->rt-name db-name)
+        table-name (->rt-name table-name)]
     (-> r (.db db-name) (.tableDrop table-name) (.run connection))))
 
 (defn ensure-index
   [{:keys [^Connection connection db-name]} table-name field-name & {:keys [multi]}]
-  (let [table-name (->rt-name table-name)
+  (let [db-name (->rt-name db-name)
+        table-name (->rt-name table-name)
         field-name (->rt-name field-name)]
     (when-not ((set (first (-> r (.db db-name) (.table table-name)
                                .indexList (.run connection)))) field-name)
@@ -91,7 +97,8 @@
 
 (defn delete-index
   [{:keys [^Connection connection db-name]} table-name field-name]
-  (let [table-name (->rt-name table-name)
+  (let [db-name (->rt-name db-name)
+        table-name (->rt-name table-name)
         field-name (->rt-name field-name)]
     (-> r (.db db-name) (.table table-name)
         (.indexDrop field-name)
