@@ -38,15 +38,18 @@
 (defn connect
   [{:keys [db-server db-name]}]
   (let [{:keys [host port timeout] :or {host "localhost" port 28015 timeout 5000}} (compact db-server)
+        db-name (->rt-name db-name)
         connection (-> r .connection
-                       (.hostname host) (.port (int port)) (.timeout timeout)
+                       (.hostname host)
+                       (.port (int port))
+                       (.timeout timeout)
                        (.db db-name)
                        .connect)
         db-connection {:db-server db-server
                        :db-name db-name
                        :connection connection
                        :subscriptions (atom {})}]
-    (ensure-db db-connection db-name)
+    (ensure-db db-connection)
     db-connection))
 
 (defn disconnect
@@ -54,12 +57,6 @@
   (doall (map (fsafe future-cancel) (vals @subscriptions)))
   (.close connection)
   nil)
-
-(defn ensure-db
-  [{:keys [^Connection connection db-name]} db-name]
-  (let [db-name (->rt-name db-name)]
-    (when-not ((set (first (-> r .dbList (.run connection)))) db-name)
-      (-> r (.dbCreate db-name) (.run connection)))))
 
 (defn table-exists?
   [{:keys [^Connection connection db-name]} table-name]
@@ -210,6 +207,11 @@
   nil)
 
 ;;; Private
+
+(defn- ensure-db
+  [{:keys [^Connection connection db-name]}]
+  (when-not ((set (first (-> r .dbList (.run connection)))) db-name)
+      (-> r (.dbCreate db-name) (.run connection))))
 
 (defn- run->result
   [{:keys [^Connection connection db-name]} expr]
