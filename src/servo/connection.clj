@@ -168,7 +168,10 @@
                  :skip (.skip expr (first opts))
                  :limit (.limit expr (first opts))
                  :match (.match expr (first opts))
-                 :slice (let [[start end] opts] (.slice expr start end)))))
+                 :slice (let [[start end] opts]
+                          (.slice expr start end))
+                 :during (let [[start end] opts]
+                           (.during expr start end)))))
            r expr)))
 
 (declare run->result)
