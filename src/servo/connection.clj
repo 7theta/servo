@@ -189,7 +189,8 @@
           (map rt-> result)
           (rt-> result)))
 
-      (instance? Result result) (map rt-> (.toList ^Result result)))))
+      (instance? Result result)
+      (map rt-> (.toList ^Result result)))))
 
 (defn subscribe
   [db-connection expr value-ref]
