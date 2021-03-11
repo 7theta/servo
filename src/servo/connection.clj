@@ -143,7 +143,7 @@
                            :else
                            (let [[field value {:keys [default] :or {default false}}] opts]
                              (-> expr
-                                 (.filter (.hashMap r (->rt-name field) value))
+                                 (.filter (.hashMap r (->rt-name field) (first (->rt-value value))))
                                  (.optArg "default" default))))
                  :between (let [[field lower upper] opts]
                             (-> expr
@@ -162,7 +162,6 @@
                  :with-fields (.withFields expr (into-array (map ->rt-name opts)))
                  :without (.without expr (into-array (map ->rt-name opts)))
                  :contains (.contains expr (first (->rt-value (first opts))))
-                 :eq (.eq expr (first (->rt-value (first opts))))
                  :nth (.nth expr (first opts))
                  :pred (pred (first opts))
                  :count (.count expr)
