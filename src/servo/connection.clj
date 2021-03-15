@@ -23,7 +23,7 @@
            [com.rethinkdb.gen.ast ReqlExpr ReqlFunction1]
            [com.rethinkdb.gen.proto ResponseType]
            [java.time OffsetDateTime]
-           [java.util Iterator]))
+           [java.util Iterator ArrayList]))
 
 (defonce ^RethinkDB r (RethinkDB/r))
 
@@ -143,7 +143,7 @@
                            :else
                            (let [[field value {:keys [default] :or {default false}}] opts]
                              (-> expr
-                                 (.filter (.hashMap r (->rt-name field) value))
+                                 (.filter (.hashMap r (->rt-name field) (first (->rt-value value))))
                                  (.optArg "default" default))))
                  :between (let [[field lower upper] opts]
                             (-> expr
@@ -161,12 +161,15 @@
                  :pluck (.pluck expr (into-array (map ->rt-name opts)))
                  :with-fields (.withFields expr (into-array (map ->rt-name opts)))
                  :without (.without expr (into-array (map ->rt-name opts)))
-                 :contains (.contains expr (first opts))
+                 :contains (.contains expr (first (->rt-value (first opts))))
                  :nth (.nth expr (first opts))
                  :pred (pred (first opts))
                  :count (.count expr)
                  :skip (.skip expr (first opts))
                  :limit (.limit expr (first opts))
+                 :distinct (if-some [index (first opts)]
+                             (.optArg (.distinct expr) "index" (->rt-name index))
+                             (.distinct expr))
                  :match (.match expr (first opts))
                  :slice (let [[start end] opts]
                           (.slice expr start end))
@@ -180,9 +183,14 @@
   [connection expr]
   (let [result (run->result connection expr)]
     (cond
-      (and (instance? Result result)
-           (= (.responseType ^Result result) ResponseType/SUCCESS_ATOM)) (rt-> (.single ^Result result))
-      (and (instance? Result result)) (map rt-> (.toList ^Result result)))))
+      (and (instance? Result result) (= (.responseType ^Result result) ResponseType/SUCCESS_ATOM))
+      (let [result (.single ^Result result)]
+        (if (instance? ArrayList result)
+          (map rt-> result)
+          (rt-> result)))
+
+      (instance? Result result)
+      (map rt-> (.toList ^Result result)))))
 
 (defn subscribe
   [db-connection expr value-ref]
