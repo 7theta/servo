@@ -75,6 +75,16 @@
   (let [table-name (->rt-name table-name)]
     (-> r (.db db-name) (.tableDrop table-name) (.run connection))))
 
+(defn extant-indices
+  [{:keys [^Connection connection db-name]} table-name]
+  (-> r
+    (.db db-name)
+    (.table table-name)
+    .indexList
+    (.run connection)
+    first
+    set))
+
 (defn get-in-row
   [fields]
   (reify ReqlFunction1
@@ -83,19 +93,24 @@
         (map ->rt-name)
         (reduce (fn [exp field] (.g ^ReqlExpr exp field)) row)))))
 
+(defn create-index
+  [{:keys [^Connection connection db-name]} table-name index-name fields {:keys [multi]}]
+  (as-> r <>
+    (.db <> db-name)
+    (.table <> table-name)
+    (if (empty? fields)
+        (.indexCreate ^Table <> index-name)
+        (.indexCreate ^Table <> index-name (get-in-row fields)))
+    (if multi (.optArg ^ReqlExpr <> "multi" true) <>)
+    (.run ^ReqlExpr <> connection)))
+
 (defn ensure-index
-  [{:keys [^Connection connection db-name]} table-name index & {:keys [multi]}]
+  [db-connection table-name index & opts]
   (let [table-name (->rt-name table-name)
         [index-name & fields] (if (sequential? index) index [index])
         index-name (->rt-name index-name)]
-    (when-not ((set (first (-> r (.db db-name) (.table table-name)
-                               .indexList (.run connection)))) index-name)
-      (-> r (.db db-name) (.table table-name)
-          (#(if (empty? fields)
-              (.indexCreate ^Table % index-name)
-              (.indexCreate ^Table % index-name (get-in-row fields))))
-          (#(if multi (.optArg ^ReqlExpr % "multi" true) %))
-          (#(.run ^ReqlExpr % connection))))))
+    (when-not ((extant-indices db-connection table-name) index-name)
+      (create-index db-connection table-name index-name fields opts))))
 
 (defn delete-index
   [{:keys [^Connection connection db-name]} table-name field-name]
