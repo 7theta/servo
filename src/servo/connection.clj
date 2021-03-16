@@ -20,14 +20,17 @@
   (:import [tempus.core DateTime]
            [com.rethinkdb RethinkDB]
            [com.rethinkdb.net Connection Result]
-           [com.rethinkdb.gen.ast ReqlExpr ReqlFunction1]
+           [com.rethinkdb.gen.ast ReqlExpr ReqlFunction1 Table]
            [com.rethinkdb.gen.proto ResponseType]
            [java.time OffsetDateTime]
            [java.util Iterator ArrayList]))
 
 (defonce ^RethinkDB r (RethinkDB/r))
 
-(declare compile connect disconnect changes ensure-db ->rt-name ->rt-value ->rt rt->)
+(declare connect disconnect
+         ensure-db extant-indices create-index
+         compile changes
+         ->rt-name ->rt-value ->rt rt->)
 
 (defmethod ig/init-key :servo/connection [_ {:keys [db-server db-name] :as opts}]
   (connect opts))
@@ -76,15 +79,11 @@
     (-> r (.db db-name) (.tableDrop table-name) (.run connection))))
 
 (defn ensure-index
-  [{:keys [^Connection connection db-name]} table-name field-name & {:keys [multi]}]
+  [db-connection table-name index & opts]
   (let [table-name (->rt-name table-name)
-        field-name (->rt-name field-name)]
-    (when-not ((set (first (-> r (.db db-name) (.table table-name)
-                               .indexList (.run connection)))) field-name)
-      (-> r (.db db-name) (.table table-name)
-          (.indexCreate field-name)
-          (#(if multi (.optArg % "multi" true) %))
-          (#(.run ^ReqlExpr % connection))))))
+        [index-name & fields] (mapv ->rt-name (if (sequential? index) index [index]))]
+    (when-not ((extant-indices db-connection table-name) index-name)
+      (create-index db-connection table-name index-name fields opts))))
 
 (defn delete-index
   [{:keys [^Connection connection db-name]} table-name field-name]
@@ -100,7 +99,7 @@
 
 (defn pred
   [expr]
-  (reify com.rethinkdb.gen.ast.ReqlFunction1
+  (reify ReqlFunction1
     (apply [this row]
       (compile expr row))))
 
@@ -222,7 +221,31 @@
 (defn- ensure-db
   [{:keys [^Connection connection db-name]}]
   (when-not ((set (first (-> r .dbList (.run connection)))) db-name)
-      (-> r (.dbCreate db-name) (.run connection))))
+    (-> r (.dbCreate db-name) (.run connection))))
+
+(defn- extant-indices
+  [{:keys [^Connection connection db-name]} table-name]
+  (-> r
+    (.db db-name)
+    (.table table-name)
+    .indexList
+    (.run connection)
+    first
+    set))
+
+(defn- create-index
+  [{:keys [^Connection connection db-name]} table-name index-name fields {:keys [multi]}]
+  (as-> r <>
+    (.db <> db-name)
+    (.table <> table-name)
+    (if (empty? fields)
+        (.indexCreate ^Table <> index-name)
+        (.indexCreate ^Table <> index-name
+                      (reify ReqlFunction1
+                        (apply [this row]
+                           (reduce (fn [exp field] (.g ^ReqlExpr exp field)) row fields)))))
+    (if multi (.optArg ^ReqlExpr <> "multi" true) <>)
+    (.run ^ReqlExpr <> connection)))
 
 (defn- run->result
   [{:keys [^Connection connection db-name]} expr]
