@@ -81,9 +81,7 @@
 (defn ensure-index
   [db-connection table-name index & opts]
   (let [table-name (->rt-name table-name)
-        [index-name & fields] (if (sequential? index)
-                                (map ->rt-name index)
-                                [(->rt-name index)])]
+        [index-name & fields] (mapv ->rt-name (if (sequential? index) index [index]))]
     (when-not ((extant-indices db-connection table-name) index-name)
       (create-index db-connection table-name index-name fields opts))))
 
