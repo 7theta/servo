@@ -84,9 +84,9 @@
 (defn ensure-index
   [db-connection table-name index & opts]
   (let [table-name (->rt-name table-name)
-            [index-name & fields] (mapv ->rt-name (if (sequential? index) index [index]))]
-        (when-not ((extant-indices db-connection table-name) index-name)
-          (create-index db-connection table-name index-name fields opts))))
+        [index-name & fields] (mapv ->rt-name (if (sequential? index) index [index]))]
+    (when-not ((extant-indices db-connection table-name) index-name)
+      (create-index db-connection table-name index-name fields opts))))
 
 (defn delete-index
   [{:keys [^Connection connection db-name]} table-name field-name]
