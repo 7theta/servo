@@ -70,11 +70,11 @@
 (defn ensure-table
   [{:keys [^Connection connection db-name]} table-name]
   (locking connection
-    (let [table-name (->rt-name table-name)]
-      (when-not ((set (first (-> r (.db db-name) .tableList (.run connection)))) table-name)
-        (try
-          (-> r (.db db-name) (.tableCreate table-name) (.run connection))
-          (catch ReqlOpFailedError _ nil))))))
+    (try
+      (let [table-name (->rt-name table-name)]
+        (when-not ((set (first (-> r (.db db-name) .tableList (.run connection)))) table-name)
+          (-> r (.db db-name) (.tableCreate table-name) (.run connection))))
+      (catch ReqlOpFailedError _ nil))))
 
 (defn delete-table
   [{:keys [^Connection connection db-name]} table-name]
@@ -82,11 +82,14 @@
     (-> r (.db db-name) (.tableDrop table-name) (.run connection))))
 
 (defn ensure-index
-  [db-connection table-name index & opts]
-  (let [table-name (->rt-name table-name)
-        [index-name & fields] (mapv ->rt-name (if (sequential? index) index [index]))]
-    (when-not ((extant-indices db-connection table-name) index-name)
-      (create-index db-connection table-name index-name fields opts))))
+  [{:keys [^Connection connection db-name] :as db-connection} table-name index & opts]
+  (locking connection
+    (try
+      (let [table-name (->rt-name table-name)
+            [index-name & fields] (mapv ->rt-name (if (sequential? index) index [index]))]
+        (when-not ((extant-indices db-connection table-name) index-name)
+          (create-index db-connection table-name index-name fields opts)))
+      (catch ReqlOpFailedError _ nil))))
 
 (defn delete-index
   [{:keys [^Connection connection db-name]} table-name field-name]
@@ -238,20 +241,17 @@
 
 (defn- create-index
   [{:keys [^Connection connection db-name]} table-name index-name fields {:keys [multi]}]
-  (locking connection
-    (try
-      (as-> r <>
-        (.db <> db-name)
-        (.table <> table-name)
-        (if (empty? fields)
-          (.indexCreate ^Table <> index-name)
-          (.indexCreate ^Table <> index-name
-                        (reify ReqlFunction1
-                          (apply [this row]
-                            (reduce (fn [exp field] (.g ^ReqlExpr exp field)) row fields)))))
-        (if multi (.optArg ^ReqlExpr <> "multi" true) <>)
-        (.run ^ReqlExpr <> connection))
-      (catch ReqlOpFailedError _ nil))))
+  (as-> r <>
+    (.db <> db-name)
+    (.table <> table-name)
+    (if (empty? fields)
+      (.indexCreate ^Table <> index-name)
+      (.indexCreate ^Table <> index-name
+                    (reify ReqlFunction1
+                      (apply [this row]
+                        (reduce (fn [exp field] (.g ^ReqlExpr exp field)) row fields)))))
+    (if multi (.optArg ^ReqlExpr <> "multi" true) <>)
+    (.run ^ReqlExpr <> connection)))
 
 (defn- run->result
   [{:keys [^Connection connection db-name]} expr]
