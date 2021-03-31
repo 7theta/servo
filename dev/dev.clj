@@ -39,7 +39,7 @@
 (ig/load-namespaces config)
 (igr/set-prep! (constantly config))
 
-(def dbc (atom nil))
+(defonce dbc (atom nil))
 
 (defn go
   []
