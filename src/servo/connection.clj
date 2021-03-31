@@ -42,12 +42,12 @@
   (try (disconnect connection) (catch Exception _ nil)))
 
 (defn connect
-  [{:keys [db-server db-name]}]
-  (let [{:keys [host port timeout await-tables]
+  [{:keys [db-server db-name await-tables]
+    :or {await-tables true}}]
+  (let [{:keys [host port timeout]
          :or {host "localhost"
               port 28015
-              timeout 5000
-              await-tables true}} (compact db-server)
+              timeout 5000}} (compact db-server)
         db-name (->rt-name db-name)
         connection (-> r .connection
                        (.hostname host)
