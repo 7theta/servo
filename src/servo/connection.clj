@@ -31,7 +31,9 @@
 (declare connect disconnect
          ensure-db extant-indices create-index
          compile changes
-         ->rt-name ->rt-value ->rt rt->)
+         ->rt-name rt-name-> ->rt-value ->rt rt->
+         await-all-tables-ready
+         run->result tx-result)
 
 (defmethod ig/init-key :servo/connection [_ {:keys [db-server db-name] :as opts}]
   (connect opts))
@@ -41,7 +43,11 @@
 
 (defn connect
   [{:keys [db-server db-name]}]
-  (let [{:keys [host port timeout] :or {host "localhost" port 28015 timeout 5000}} (compact db-server)
+  (let [{:keys [host port timeout await-tables]
+         :or {host "localhost"
+              port 28015
+              timeout 5000
+              await-tables true}} (compact db-server)
         db-name (->rt-name db-name)
         connection (-> r .connection
                        (.hostname host)
@@ -54,6 +60,8 @@
                        :connection connection
                        :subscriptions (atom {})}]
     (ensure-db db-connection)
+    (when await-tables
+      (await-all-tables-ready db-connection))
     db-connection))
 
 (defn disconnect
@@ -66,6 +74,24 @@
   [{:keys [^Connection connection db-name]} table-name]
   (let [table-name (->rt-name table-name)]
     (boolean ((set (-> r (.db db-name) .tableList (.run connection))) table-name))))
+
+(defn table-status
+  [{:keys [^Connection connection db-name]} table-name]
+  (-> r
+      (.db db-name)
+      (.table (->rt-name table-name))
+      (.status)
+      (.run connection)
+      (tx-result)))
+
+(defn table-list
+  [{:keys [^Connection connection db-name]}]
+  (->> (-> r
+           (.db (->rt-name db-name))
+           (.tableList)
+           (.run connection)
+           tx-result)
+       (map rt-name->)))
 
 (defn ensure-table
   [{:keys [^Connection connection db-name]} table-name]
@@ -182,20 +208,9 @@
                            (.during expr start end)))))
            r expr)))
 
-(declare run->result)
-
 (defn run
   [connection expr]
-  (let [result (run->result connection expr)]
-    (cond
-      (and (instance? Result result) (= (.responseType ^Result result) ResponseType/SUCCESS_ATOM))
-      (let [result (.single ^Result result)]
-        (if (instance? ArrayList result)
-          (map rt-> result)
-          (rt-> result)))
-
-      (instance? Result result)
-      (map rt-> (.toList ^Result result)))))
+  (tx-result (run->result connection expr)))
 
 (defn subscribe
   [db-connection expr value-ref]
@@ -232,12 +247,12 @@
 (defn- extant-indices
   [{:keys [^Connection connection db-name]} table-name]
   (-> r
-    (.db db-name)
-    (.table table-name)
-    .indexList
-    (.run connection)
-    first
-    set))
+      (.db db-name)
+      (.table table-name)
+      .indexList
+      (.run connection)
+      first
+      set))
 
 (defn- create-index
   [{:keys [^Connection connection db-name]} table-name index-name fields {:keys [multi]}]
@@ -339,6 +354,10 @@
    (str (when (keyword? s) (when-let [ns (namespace s)] (str ns "/")))
         (name s))))
 
+(defn- rt-name->
+  [s]
+  (keyword (hyphenate s)))
+
 (defn- ->rt-key
   [k]
   (cond
@@ -393,3 +412,33 @@
   (if (or (map? m) (instance? java.util.Map m))
     (not-empty (xform-map m rt-key-> rt-value->))
     (first (rt-value-> m))))
+
+(defn tx-result
+  [result]
+  (cond
+    (and (instance? Result result) (= (.responseType ^Result result) ResponseType/SUCCESS_ATOM))
+    (let [result (.single ^Result result)]
+      (if (instance? ArrayList result)
+        (map rt-> result)
+        (rt-> result)))
+
+    (instance? Result result)
+    (map rt-> (.toList ^Result result))))
+
+(defn await-all-tables-ready
+  [db-conn]
+  (let [table-list (table-list db-conn)
+        tables-ready (fn []
+                       (->> table-list
+                            (map (partial table-status db-conn))
+                            (filter (comp :all-replicas-ready :status))
+                            (count)))]
+    (loop []
+      (let [ready-count (tables-ready)]
+        (when (< ready-count (count table-list))
+          (println (format "[servo.connection] %s/%s tables ready."
+                           ready-count
+                           (count table-list)))
+          (Thread/sleep 5000)
+          (recur))))
+    (println "[servo.connection] All tables ready.")))
