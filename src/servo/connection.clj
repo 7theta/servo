@@ -24,7 +24,7 @@
            [com.rethinkdb.gen.proto ResponseType]
            [com.rethinkdb.gen.exc ReqlOpFailedError]
            [java.time OffsetDateTime]
-           [java.util Iterator ArrayList]))
+           [java.util Iterator ArrayList NoSuchElementException]))
 
 (defonce ^RethinkDB r (RethinkDB/r))
 
@@ -210,7 +210,13 @@
 
 (defn run
   [connection expr]
-  (tx-result (run->result connection expr)))
+  (let [result (try (tx-result (run->result connection expr))
+                    (catch NoSuchElementException e
+                      (println "Encountered NoSuchElementException in run, retrying.")
+                      ::retry))]
+    (if (not= ::retry result)
+      result
+      (recur connection expr))))
 
 (defn subscribe
   [db-connection expr value-ref]
@@ -290,45 +296,51 @@
   [db-connection expr callback-fn]
   (let [sub-id (str (java.util.UUID/randomUUID))
         sub (future
-              (try
-                (let [cursor (run->result db-connection
-                                          (concat expr
-                                                  [[:changes]
-                                                   #_[:opt-arg :include-initial true]
-                                                   [:opt-arg :squash true]
-                                                   [:opt-arg :include-types true]
-                                                   #_[:opt-arg :include-states true]]))]
-                  (loop [changes (.iterator ^Result cursor)]
-                    (let [raw-change (.next ^Iterator changes)]
-                      (when-let [change (not-empty
-                                         (-> (rt-> raw-change)
-                                             (update :type keyword)))]
-                        (case (:type change)
-                          :remove
-                          (callback-fn [{:type :remove
-                                         :id (get-in change [:old-val :id])}])
+              (loop []
+                (when (= ::retry
+                         (try
+                           (let [cursor (run->result db-connection
+                                                     (concat expr
+                                                             [[:changes]
+                                                              #_[:opt-arg :include-initial true]
+                                                              [:opt-arg :squash true]
+                                                              [:opt-arg :include-types true]
+                                                              #_[:opt-arg :include-states true]]))]
+                             (loop [changes (.iterator ^Result cursor)]
+                               (let [raw-change (.next ^Iterator changes)]
+                                 (when-let [change (not-empty
+                                                    (-> (rt-> raw-change)
+                                                        (update :type keyword)))]
+                                   (case (:type change)
+                                     :remove
+                                     (callback-fn [{:type :remove
+                                                    :id (get-in change [:old-val :id])}])
 
-                          :change
-                          (callback-fn [{:type :remove
-                                         :id (get-in change [:old-val :id])}
-                                        {:type :add
-                                         :id (get-in change [:new-val :id])
-                                         :value (:new-val change)}])
+                                     :change
+                                     (callback-fn [{:type :remove
+                                                    :id (get-in change [:old-val :id])}
+                                                   {:type :add
+                                                    :id (get-in change [:new-val :id])
+                                                    :value (:new-val change)}])
 
-                          :add
-                          (callback-fn [{:type :add
-                                         :id (get-in change [:new-val :id])
-                                         :value (:new-val change)}])
+                                     :add
+                                     (callback-fn [{:type :add
+                                                    :id (get-in change [:new-val :id])
+                                                    :value (:new-val change)}])
 
-                          nil)))
-                    (recur changes)))
-                (catch Exception e
-                  (when-not (= "java.lang.InterruptedException"
-                               (-> e Throwable->map :via first :message))
-                    (println "Error (" (pr-str expr) "):"
-                             (pr-str (Throwable->map e)))
-                    (println (.printStackTrace e))
-                    (swap! (:subscriptions db-connection) dissoc sub-id)))))]
+                                     nil)))
+                               (recur changes)))
+                           (catch NoSuchElementException e
+                             (println "Encountered NoSuchElementException in changefeed, retrying.")
+                             ::retry)
+                           (catch Exception e
+                             (when-not (= "java.lang.InterruptedException"
+                                          (-> e Throwable->map :via first :message))
+                               (println "Error (" (pr-str expr) "):"
+                                        (pr-str (Throwable->map e)))
+                               (println (.printStackTrace e))
+                               (swap! (:subscriptions db-connection) dissoc sub-id)))))
+                  (recur))))]
     (swap! (:subscriptions db-connection) assoc sub-id sub)
     sub-id))
 
