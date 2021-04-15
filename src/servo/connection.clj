@@ -72,7 +72,12 @@
 
 (defn table-exists?
   [{:keys [^Connection connection db-name]} table-name]
-  (boolean ((set (-> r (.db db-name) .tableList (.run connection) tx-result)) (->rt-name table-name))))
+  (boolean ((set (-> r
+                   (.db db-name)
+                   .tableList
+                   (.run connection)
+                   tx-result))
+            (->rt-name table-name))))
 
 (defn table-status
   [{:keys [^Connection connection db-name]} table-name]
