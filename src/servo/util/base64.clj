@@ -7,14 +7,13 @@
 ;;   the terms of this license.
 ;;   You must not remove this notice, or any others, from this software.
 
-(ns servo.events
-  (:require [servo.connection :as db]
-            [via.events :refer [reg-event-via]]
-            [integrant.core :as ig]))
+(ns servo.util.base64
+  (:import [java.util Base64]))
 
-(defmethod ig/init-key :servo/events [_ {:keys [db-connection]}]
-  (reg-event-via
-   :servo/run
-   (fn [_ [_ expr]]
-     {:via/status 200
-      :via/reply (db/run db-connection expr)})))
+(defn encode
+  [b]
+  (.encodeToString (Base64/getEncoder) b))
+
+(defn decode
+  [s]
+  (.decode (Base64/getDecoder) ^String s))
