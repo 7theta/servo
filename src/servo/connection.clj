@@ -300,6 +300,7 @@
       (case id
         :db-list {:response-fn (partial map rt-name->)}
         :db {:arguments [(->rt-name (first parameters))]}
+        :db-create {:arguments [(->rt-name (first parameters))]}
         :table-list {:response-fn (partial map rt-name->)}
         :index-list {:response-fn (partial map rt-name->)}
         :table {:arguments [(->rt-name (first parameters))]}
@@ -451,7 +452,7 @@
 (defn- ensure-db
   [connection db-name]
   (when-not ((set @(run connection [[:db-list]])) db-name)
-    @(run connection [[:db-create db-name]])))
+    @(run connection [[:db-create (->rt-name db-name)]])))
 
 (defn- await-tables-ready
   [connection]
