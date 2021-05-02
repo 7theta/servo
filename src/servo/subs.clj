@@ -10,7 +10,7 @@
 (ns servo.subs
   (:require [servo.connection :as db]
             [via.endpoint :as via]
-            [signum.atom :as s]
+            [signum.signal :as s]
             [signum.subs :refer [reg-sub]]
             [utilis.map :refer [map-vals]]
             [integrant.core :as ig]
@@ -21,18 +21,15 @@
     (reg-sub
      :servo/subscribe
      (fn [[_ expr]]
-       (let [value-ref (s/atom {})
-             db-subscription (db/subscribe db-connection expr value-ref)]
-         (swap! subscriptions assoc expr db-subscription)
-         {:value-ref value-ref
-          :db-subscription db-subscription}))
-     (fn [{:keys [db-subscription]} expr]
+       (let [value-ref (db/subscribe db-connection expr)]
+         (swap! subscriptions assoc expr value-ref)
+         {:value-ref value-ref}))
+     (fn [{:keys [value-ref]} expr]
        (swap! subscriptions dissoc expr)
-       (db/dispose db-connection db-subscription))
+       (db/dispose db-connection value-ref))
      (fn [{:keys [value-ref]} expr]
        @value-ref))
-    {:db-connection db-connection
-     :subscriptions subscriptions}))
+    {:subscriptions subscriptions}))
 
 (defmethod ig/halt-key! :servo/subs [_ {:keys [db-connection subscriptions]}]
   (doseq [[_ subscription] @subscriptions]

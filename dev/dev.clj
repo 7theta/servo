@@ -12,6 +12,7 @@
   "Tools for interactive development with the REPL. This file should
   not be included in a production build of the application."
   (:require [servo.connection :as servo]
+            [signum.signal :refer [signal alter!]]
             [signum.subs :refer [subscribe]]
 
             [integrant.core :as ig]
@@ -28,7 +29,8 @@
 (def config
   {:servo/connection
    {:db-server {:host "localhost" :port 28015}
-    :db-name "test"}
+    :db-name :test
+    :trace true}
 
    :servo/subs
    {:db-connection (ig/ref :servo/connection)}
