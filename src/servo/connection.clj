@@ -16,7 +16,8 @@
             [utilis.types.number :refer [string->long string->double]]
             [inflections.core :refer [hyphenate underscore]]
             [integrant.core :as ig]
-            [clojure.core.protocols :refer [IKVReduce]])
+            [clojure.core.protocols :refer [IKVReduce]]
+            [clojure.core.async :refer [sliding-buffer chan >!! <!! close!]])
   (:import [tempus.core DateTime]
            [com.rethinkdb RethinkDB]
            [com.rethinkdb.net Connection Result]
@@ -66,17 +67,18 @@
 
 (defn disconnect
   [{:keys [^Connection connection subscriptions]}]
-  (doall (map (fsafe future-cancel) (vals @subscriptions)))
+  (doseq [{:keys [shutdown]} (vals @subscriptions)]
+    ((fsafe shutdown)))
   (.close connection)
   nil)
 
 (defn table-exists?
   [{:keys [^Connection connection db-name]} table-name]
   (boolean ((set (-> r
-                   (.db db-name)
-                   .tableList
-                   (.run connection)
-                   tx-result))
+                     (.db db-name)
+                     .tableList
+                     (.run connection)
+                     tx-result))
             (->rt-name table-name))))
 
 (defn table-status
@@ -224,26 +226,19 @@
 
 (defn subscribe
   [db-connection expr value-ref]
-  (let [single-value (some (partial = :get) (map first expr))]
-    (reset! value-ref (let [result (run db-connection expr)]
-                        (if (map? result)
-                          result
-                          (->> result
-                               (reduce (fn [value row] (assoc! value (:id row) row))
-                                       (transient {}))
-                               persistent!))))
-    (changes db-connection expr
-             (fn [changes]
-               (swap! value-ref (fn [m]
-                                  (reduce (fn [m {:keys [type id value]}]
-                                            (if (= :remove type)
-                                              (if single-value {} (dissoc m id))
-                                              (if single-value value (assoc m id value)))) m changes)))))))
+  (reset! value-ref (let [result (run db-connection expr)]
+                      (if (map? result)
+                        result
+                        (->> result
+                             (reduce (fn [value row] (assoc! value (:id row) row))
+                                     (transient {}))
+                             persistent!))))
+  (changes db-connection expr value-ref))
 
 (defn dispose
   [{:keys [subscriptions]} subscription]
-  (when-let [sub (clojure.core/get @subscriptions subscription)]
-    (future-cancel sub)
+  (when-let [{:keys [shutdown]} (clojure.core/get @subscriptions subscription)]
+    ((fsafe shutdown))
     (swap! subscriptions dissoc subscription))
   nil)
 
@@ -297,8 +292,18 @@
           ret)))))
 
 (defn- changes
-  [db-connection expr callback-fn]
-  (let [sub-id (str (java.util.UUID/randomUUID))
+  [db-connection expr value-ref]
+  (let [single-value (some (partial = :get) (map first expr))
+        local-value-ref (atom @value-ref)
+        local-value-ch (chan (sliding-buffer 1))
+        callback-fn (fn [changes]
+                      (let [value (swap! local-value-ref (fn [m]
+                                                           (reduce (fn [m {:keys [type id value]}]
+                                                                     (if (= :remove type)
+                                                                       (if single-value {} (dissoc m id))
+                                                                       (if single-value value (assoc m id value)))) m changes)))]
+                        (>!! local-value-ch value)))
+        sub-id (str (java.util.UUID/randomUUID))
         sub (future
               (loop []
                 (when (= ::retry
@@ -343,9 +348,23 @@
                                (println "Error (" (pr-str expr) "):"
                                         (pr-str (Throwable->map e)))
                                (println (.printStackTrace e))
+                               (close! local-value-ch)
                                (swap! (:subscriptions db-connection) dissoc sub-id)))))
-                  (recur))))]
-    (swap! (:subscriptions db-connection) assoc sub-id sub)
+                  (recur))))
+        local-value-ft (future
+                         (loop []
+                           (when-let [value (<!! local-value-ch)]
+                             (try
+                               (reset! value-ref value)
+                               (catch Exception e))
+                             (recur))))]
+    (swap! (:subscriptions db-connection) assoc sub-id
+           {:shutdown (fn []
+                        (try
+                          (try (future-cancel sub) (catch Exception e))
+                          (close! local-value-ch)
+                          (catch Exception e
+                            )))})
     sub-id))
 
 (defn- xform-map
