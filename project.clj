@@ -13,7 +13,7 @@
   :license {:name "MIT License"
             :url "https://opensource.org/licenses/MIT"}
   :dependencies [[org.clojure/clojure "1.10.3"]
-                 [com.7theta/via "7.0.0"]
+                 [com.7theta/signum "4.1.0"]
                  [com.7theta/tempus "0.3.1"]
 
                  [aleph "0.4.7-alpha7"]

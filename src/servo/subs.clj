@@ -9,12 +9,9 @@
 
 (ns servo.subs
   (:require [servo.connection :as db]
-            [via.endpoint :as via]
-            [signum.signal :as s]
             [signum.subs :refer [reg-sub]]
             [utilis.map :refer [map-vals]]
-            [integrant.core :as ig]
-            [via.endpoint :as via]))
+            [integrant.core :as ig]))
 
 (defmethod ig/init-key :servo/subs [_ {:keys [db-connection]}]
   (let [subscriptions (atom {})]

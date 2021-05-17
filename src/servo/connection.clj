@@ -331,17 +331,19 @@
                      (map? value)
                      {:arguments [(->rt value)]})
                    {:options options
-                    :response-fn (partial map rt->)}))
+                    :response-fn rt->}))
         :between (let [[lower upper options] parameters]
                    {:arguments (map ->rt-value [lower upper])
                     :options (when options
                                {"index" (->rt-name (:index options))})})
-        :order-by (let [{:keys [index]} (first parameters)]
-                    {:options {"index" (if (and (vector? index)
-                                                (#{:asc :desc} (first index)))
-                                         (let [[order index] index]
-                                           [(get term-types order) [(->rt-name index)]])
-                                         (->rt-name index))}})
+        :order-by (if (map? (first parameters))
+                    (let [{:keys [index]} (first parameters)]
+                      {:options {"index" (if (and (vector? index)
+                                                  (#{:asc :desc} (first index)))
+                                           (let [[order index] index]
+                                             [(get term-types order) [(->rt-name index)]])
+                                           (->rt-name index))}})
+                    {:arguments [(->rt-name (first parameters))]})
         :get-field {:arguments [(->rt-name (first parameters))]}
         :pluck {:arguments [(nested-fields)]}
         :with-fields {:arguments [(nested-fields)]}
@@ -365,7 +367,10 @@
                     (let [{:keys [id arguments options]} (->rt-query-term term)]
                       (remove nil? [id (cond->> arguments query (cons query)
                                                 true (remove nil?)) options]))) nil query)
-   :response-fn (or (:response-fn (->rt-query-term (last query))) identity)})
+   :response-fn (or (->> (map (comp :response-fn ->rt-query-term) query)
+                         (remove nil?)
+                         last)
+                    rt->)})
 
 (defn- xform-map
   [m kf vf]
@@ -375,9 +380,6 @@
                      (and (map? v) (= "TIME" (get v :$reql-type$))) (vf v)
                      (instance? DateTime v) (vf v)
                      (map? v) (xform-map v kf vf)
-                     (coll? v) (mapv #(if (map? %)
-                                        (xform-map % kf vf)
-                                        (vf %)) v)
                      :else (vf v))]) m)))
 
 (defn- ->rt-name
@@ -414,12 +416,15 @@
     (instance? DateTime v) {"$reql_type$" "TIME"
                             "epoch_time" (t/into :long v)
                             "timezone" "+00:00"}
+    (or (vector? v) (seq? v)) [(get term-types :make-array)
+                               (map ->rt v)]
     :else v))
 
 (defn- rt-value->
   [v]
   (cond
-    (and (map? v) (= "TIME" (get v :$reql-type$))) (t/from :long (:epoch-time v))
+    (and (map? v) (= "TIME" (get v :$reql-type$))) (t/from :long (* 1000 (:epoch-time v)))
+    (or (vector? v) (seq? v)) (map rt-> v)
     (string? v) (rt-string-> v)
     :else v))
 
@@ -437,7 +442,7 @@
 (defn- ->rt
   [v]
   (cond
-    (seq? v) (map ->rt v)
+    (or (seq? v) (vector? v)) [(get term-types :make-array) (map ->rt v)]
     (map? v) (xform-map v ->rt-key ->rt-value)
     :else (->rt-value v)))
 
