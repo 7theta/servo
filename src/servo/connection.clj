@@ -454,7 +454,7 @@
 
 (defn- ensure-db
   [connection db-name]
-  (when-not ((set @(run connection [[:db-list]])) db-name)
+  (when-not ((set @(run connection [[:db-list]])) (rt-name-> db-name))
     @(run connection [[:db-create (->rt-name db-name)]])))
 
 (defn- await-tables-ready
