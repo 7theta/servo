@@ -423,6 +423,7 @@
   [v]
   (cond
     (and (map? v) (= "TIME" (get v "$reql_type$"))) (t/from :long (* 1000 (get v "epoch_time")))
+    (and (map? v) (= "TIME" (get v :$reql-type$))) (t/from :long (* 1000 (get v :epoch-time)))
     (or (vector? v) (seq? v)) (map rt-> v)
     (string? v) (rt-string-> v)
     :else v))
@@ -441,6 +442,7 @@
 (defn- ->rt
   [v]
   (cond
+    (instance? DateTime v) (->rt-value v)
     (or (seq? v) (vector? v)) [(get term-types :make-array) (map ->rt v)]
     (map? v) (xform-map v ->rt-key ->rt-value)
     :else (->rt-value v)))
@@ -448,6 +450,8 @@
 (defn- rt->
   [m]
   (cond
+    (and (map? m) (= "TIME" (get m "$reql_type$"))) (rt-value-> m)
+    (and (map? m) (= "TIME" (get m :$reql-type$))) (rt-value-> m)
     (map? m) (not-empty (xform-map m rt-key-> rt-value->))
     :else (rt-value-> m)))
 
