@@ -428,7 +428,7 @@
   (cond
     (and (map? v) (= "TIME" (get v "$reql_type$"))) (t/from :long (* 1000 (get v "epoch_time")))
     (and (map? v) (= "TIME" (get v :$reql-type$))) (t/from :long (* 1000 (get v :epoch-time)))
-    (or (vector? v) (seq? v)) (map rt-> v)
+    (or (vector? v) (seq? v)) (into (empty v) (map rt-> v))
     (string? v) (rt-string-> v)
     :else v))
 
