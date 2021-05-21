@@ -20,7 +20,7 @@
             [byte-streams :as bs]
             [jsonista.core :as json]
             [inflections.core :refer [hyphenate underscore]]
-            [utilis.map :refer [compact map-keys]]
+            [utilis.map :refer [compact map-keys map-vals]]
             [utilis.types.number :refer [string->long string->double]]
             [clojure.string :as st]
             [integrant.core :as ig])
@@ -162,9 +162,11 @@
 (defn dispose
   [{:keys [feeds subscriptions] :as connection} value-ref]
   (let [feed (get @subscriptions value-ref)]
-    (send connection (get-in @feeds [feed :token]) [(get request-types :stop)])
-    (swap! feeds dissoc feed)
-    (swap! subscriptions dissoc value-ref))
+    (if-let [token (get-in @feeds [feed :token])]
+      (do (send connection (get-in @feeds [feed :token]) [(get request-types :stop)])
+          (swap! feeds dissoc feed)
+          (swap! subscriptions dissoc value-ref))
+      (println (ex-info "null token in servo.connection/dispose" {:value-ref value-ref}))))
   nil)
 
 (defn noreply-wait
@@ -216,7 +218,7 @@
 (defn- send
   [{:keys [rql-connection trace]} token query]
   (when trace (println (format ">> 0x%04x" token) (pr-str query)))
-  (s/put! rql-connection [token query]))
+  (when token (s/put! rql-connection [token query])))
 
 (declare response-types response-note-types response-error-types)
 
@@ -278,7 +280,7 @@
         (swap! queries dissoc token)))))
 
 (declare term-types response-types response-error-types
-         ->rt ->rt-key ->rt-name ->rt-value
+         ->rt ->rt-options ->rt-key ->rt-name ->rt-value
          rt-> rt-string-> rt-key-> rt-name-> rt-value->)
 
 (defn- ->rt-query-term
@@ -320,10 +322,10 @@
                                  (->rt value)
                                  [(get term-types :make-array)
                                   (map ->rt value)])]
-                   :options (->rt options)})
+                   :options (->rt-options options)})
         :update (let [[value options] parameters]
                   {:arguments [(->rt value)]
-                   :options (->rt options)})
+                   :options (->rt-options options)})
         :filter (let [[value options] parameters]
                   (merge
                    (cond
@@ -447,6 +449,15 @@
     (or (seq? v) (vector? v)) [(get term-types :make-array) (map ->rt v)]
     (map? v) (xform-map v ->rt-key ->rt-value)
     :else (->rt-value v)))
+
+(defn- ->rt-options
+  [options]
+  (->> options
+       (map-vals (fn [option]
+                   (if (keyword? option)
+                     (name option)
+                     option)))
+       ->rt))
 
 (defn- rt->
   [m]
