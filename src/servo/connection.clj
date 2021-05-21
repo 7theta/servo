@@ -32,11 +32,13 @@
          json-mapper ->rt-name ->rt-query ->rt-query-term
          send handle-message token request-types)
 
-(defmethod ig/init-key :servo/connection [_ {:keys [db-server db-name] :as options}]
+(defmethod ig/init-key :servo/connection [_ options]
   (connect options))
 
 (defmethod ig/halt-key! :servo/connection [_ connection]
-  (try (disconnect connection) (catch Exception _ nil)))
+  (try (disconnect connection) (catch Exception e
+                                 (when (:trace connection)
+                                   (println ":servo/connection shutdown exception" e)))))
 
 (defn connect
   [{:keys [db-server db-name await-ready trace]
@@ -93,9 +95,7 @@
   [{:keys [queries feeds subscriptions rql-connection tcp-connection]}]
   (when rql-connection (s/close! rql-connection))
   (when tcp-connection (s/close! tcp-connection))
-  (reset! queries nil)
-  (reset! feeds nil)
-  (reset! subscriptions nil))
+  nil)
 
 (defonce ^:private var-counter (atom 0))
 
@@ -124,8 +124,8 @@
 
 (defn subscribe
   [{:keys [feeds subscriptions] :as connection} query]
-  (when (= :changes (first (last query)))
-    (throw (ex-info ":servo/connection subscribe query should not include :changes")))
+  (when (some #(= :changes (first %)) query)
+    (throw (ex-info ":servo/connection subscribe query should not include :changes" {:query query})))
   (let [feed @(run connection (concat query [[:changes {:squash true
                                                         :include-initial true
                                                         :include-types true}]]))
@@ -163,7 +163,6 @@
   [{:keys [feeds subscriptions] :as connection} value-ref]
   (let [feed (get @subscriptions value-ref)]
     (send connection (get-in @feeds [feed :token]) [(get request-types :stop)])
-    (s/close! feed)
     (swap! feeds dissoc feed)
     (swap! subscriptions dissoc value-ref))
   nil)
@@ -358,7 +357,7 @@
         ;; :func (let [[params body] (first parameters)]
         ;;         [(->rt-query-term params) (->rt-query-term body)])
         :changes {:options (map-keys (comp underscore name) (first parameters))
-                  :response-fn #(-> % (update :new-val rt->) (update :old-val rt->) compact)}
+                  :response-fn #(cond-> % (:new-val %) (update :new-val rt->) (:old-val %) (update :old-val rt->))}
         {:arguments parameters})))))
 
 (defn- ->rt-query
@@ -377,7 +376,7 @@
   (into {} (map (fn [[k v]]
                   [(kf k)
                    (cond
-                     (and (map? v) (= "TIME" (get v :$reql-type$))) (vf v)
+                     (and (map? v) (= "TIME" (get v "$reql_type$"))) (vf v)
                      (instance? DateTime v) (vf v)
                      (map? v) (xform-map v kf vf)
                      :else (vf v))]) m)))
@@ -414,7 +413,7 @@
   (cond
     (keyword? v) (str "servo/keyword=" (->rt-name v))
     (instance? DateTime v) {"$reql_type$" "TIME"
-                            "epoch_time" (t/into :long v)
+                            "epoch_time" (long (/ (t/into :long v) 1000))
                             "timezone" "+00:00"}
     (or (vector? v) (seq? v)) [(get term-types :make-array)
                                (map ->rt v)]
@@ -423,7 +422,7 @@
 (defn- rt-value->
   [v]
   (cond
-    (and (map? v) (= "TIME" (get v :$reql-type$))) (t/from :long (* 1000 (:epoch-time v)))
+    (and (map? v) (= "TIME" (get v "$reql_type$"))) (t/from :long (* 1000 (get v "epoch_time")))
     (or (vector? v) (seq? v)) (map rt-> v)
     (string? v) (rt-string-> v)
     :else v))

@@ -16,7 +16,7 @@
             [signum.subs :refer [subscribe]]
 
             [integrant.core :as ig]
-            [integrant.repl :refer [clear init reset reset-all] :as igr]
+            [integrant.repl :as igr]
             [integrant.repl.state :refer [system]]
 
             [clojure.tools.namespace.repl :refer [refresh refresh-all]]
@@ -53,3 +53,9 @@
   []
   (igr/halt)
   (reset! dbc nil))
+
+(defn reset
+  []
+  (halt)
+  (igr/reset)
+  (go))
