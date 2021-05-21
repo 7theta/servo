@@ -377,6 +377,7 @@
                   [(kf k)
                    (cond
                      (and (map? v) (= "TIME" (get v "$reql_type$"))) (vf v)
+                     (and (map? v) (= "TIME" (get v :$reql-type$))) (vf v)
                      (instance? DateTime v) (vf v)
                      (map? v) (xform-map v kf vf)
                      :else (vf v))]) m)))
@@ -413,7 +414,7 @@
   (cond
     (keyword? v) (str "servo/keyword=" (->rt-name v))
     (instance? DateTime v) {"$reql_type$" "TIME"
-                            "epoch_time" (long (/ (t/into :long v) 1000))
+                            "epoch_time" (double (/ (t/into :long v) 1000))
                             "timezone" "+00:00"}
     (or (vector? v) (seq? v)) [(get term-types :make-array)
                                (map ->rt v)]
