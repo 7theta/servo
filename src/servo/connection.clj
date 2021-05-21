@@ -23,7 +23,8 @@
             [utilis.map :refer [compact map-keys map-vals]]
             [utilis.types.number :refer [string->long string->double]]
             [clojure.string :as st]
-            [integrant.core :as ig])
+            [integrant.core :as ig]
+            [clojure.tools.logging :as log])
   (:import [tempus.core DateTime]
            [java.nio ByteBuffer ByteOrder]
            [java.io ByteArrayOutputStream]))
@@ -38,7 +39,7 @@
 (defmethod ig/halt-key! :servo/connection [_ connection]
   (try (disconnect connection) (catch Exception e
                                  (when (:trace connection)
-                                   (println ":servo/connection shutdown exception" e)))))
+                                   (log/error ":servo/connection shutdown exception" e)))))
 
 (defn connect
   [{:keys [db-server db-name await-ready trace]
@@ -153,7 +154,7 @@
                              (constantly (:new-val change))
                              #(conj % (:new-val change))))
 
-                   :else (println ":servo/connection unknown change type" (pr-str query) (pr-str change))))
+                   :else (log/warn ":servo/connection unknown change type" (pr-str query) (pr-str change))))
                feed)
     value-ref))
 
@@ -166,7 +167,7 @@
       (do (send connection (get-in @feeds [feed :token]) [(get request-types :stop)])
           (swap! feeds dissoc feed)
           (swap! subscriptions dissoc value-ref))
-      (println (ex-info "null token in servo.connection/dispose" {:value-ref value-ref}))))
+      (log/error (ex-info "null token in servo.connection/dispose" {:value-ref value-ref}))))
   nil)
 
 (defn noreply-wait
@@ -217,7 +218,7 @@
 
 (defn- send
   [{:keys [rql-connection trace]} token query]
-  (when trace (println (format ">> 0x%04x" token) (pr-str query)))
+  (when trace (log/info (format ">> 0x%04x" token) (pr-str query)))
   (when token (s/put! rql-connection [token query])))
 
 (declare response-types response-note-types response-error-types)
@@ -237,7 +238,7 @@
                      (s/put-all! @response-d r)
                      (when (and response-d close)
                        (s/close! @response-d)))]
-    (when trace (println (format "<< 0x%04x" token) (pr-str response)))
+    (when trace (log/info (format "<< 0x%04x" token) (pr-str response)))
     (try
       (case (get response-types t)
         :success-atom
@@ -484,12 +485,12 @@
     (loop []
       (let [ready-count (await-tables-ready)]
         (when (< ready-count (count table-list))
-          (when trace (println (format ":servo/connection %s/%s tables ready."
-                                       ready-count
-                                       (count table-list))))
+          (when trace (log/info (format ":servo/connection %s/%s tables ready."
+                                        ready-count
+                                        (count table-list))))
           (Thread/sleep 1000)
           (recur))))
-    (when trace (println ":servo/connection all tables ready"))))
+    (when trace (log/info ":servo/connection all tables ready"))))
 
 (def ^:private request-types
   {:start 1
