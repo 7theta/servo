@@ -37,9 +37,9 @@
   (connect options))
 
 (defmethod ig/halt-key! :servo/connection [_ connection]
-  (try (disconnect connection) (catch Exception e
-                                 (when (:trace connection)
-                                   (log/error ":servo/connection shutdown exception" e)))))
+  (try (disconnect connection)
+       (catch Exception e
+         (log/error ":servo/connection shutdown exception" e))))
 
 (defn connect
   [{:keys [db-server db-name await-ready trace]
@@ -55,14 +55,15 @@
                                             bs/to-string
                                             (json/read-value json/keyword-keys-object-mapper)))
                        (catch Exception _
-                         (throw (ex-info ":servo/connection initial handshake failed"))))
+                         (throw (ex-info ":servo/connection initial handshake failed"
+                                         {:db-server db-server :db-name db-name}))))
           send (fn [message]
                  (s/put! @tcp-connection
                          (let [json-str (json/write-value-as-string message json-mapper)]
                            ;; Rethink requires JSON strings to be "null terminated"
                            (byte-array (inc (count json-str)) (map int json-str)))))
           recv #(json/read-value (bs/to-string @(s/take! @tcp-connection)) json-mapper)
-          {:keys [message client-initial-scram]} (scram/initial-proposal {:username "admin"})
+          {:keys [message client-initial-scram]} (scram/initial-proposal {:username username})
           _ (send message)
           {:keys [server-scram server-authentication]} (scram/server-challenge {:client-initial-scram client-initial-scram}
                                                                                (recv))
@@ -154,7 +155,7 @@
                              (constantly (:new-val change))
                              #(conj % (:new-val change))))
 
-                   :else (log/warn ":servo/connection unknown change type" (pr-str query) (pr-str change))))
+                   :else (log/warn ":servo/connection unknown change type" query change)))
                feed)
     value-ref))
 
@@ -162,12 +163,13 @@
 
 (defn dispose
   [{:keys [feeds subscriptions] :as connection} value-ref]
-  (let [feed (get @subscriptions value-ref)]
-    (if-let [token (get-in @feeds [feed :token])]
-      (do (send connection (get-in @feeds [feed :token]) [(get request-types :stop)])
-          (swap! feeds dissoc feed)
-          (swap! subscriptions dissoc value-ref))
-      (log/error (ex-info "null token in servo.connection/dispose" {:value-ref value-ref}))))
+  (locking connection
+    (if-let [feed (get @subscriptions value-ref)]
+      (when-let [token (get-in @feeds [feed :token])]
+        (send connection (get-in @feeds [feed :token]) [(get request-types :stop)])
+        (swap! feeds dissoc feed)
+        (swap! subscriptions dissoc value-ref))
+      (log/error (ex-info ":servo.connection/dispose unknown subscription" {:signal (hash value-ref)}))))
   nil)
 
 (defn noreply-wait
