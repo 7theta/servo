@@ -42,8 +42,12 @@
          (log/error ":servo/connection shutdown exception" e))))
 
 (defn connect
-  [{:keys [db-server db-name await-ready trace]
-    :or {await-ready true}}]
+  [{:keys [db-server db-name await-ready trace
+           response-buffer change-batch-size change-batch-latency]
+    :or {await-ready true
+         response-buffer 100
+         change-batch-size 1000
+         change-batch-latency 50}}]
   (let [{:keys [host port username password]
          :or {host "localhost"
               port 28015
@@ -86,7 +90,9 @@
                         :subscriptions (atom {})
                         :tcp-connection @tcp-connection
                         :rql-connection (->rql-connection @tcp-connection)
-                        :response-buffer 100
+                        :response-buffer response-buffer
+                        :change-batch-size change-batch-size
+                        :change-batch-latency change-batch-latency
                         :trace trace}]
         (s/consume (partial handle-message connection) (:rql-connection connection))
         (ensure-db connection db-name)
@@ -128,34 +134,38 @@
   [{:keys [feeds subscriptions] :as connection} query]
   (when (some #(= :changes (first %)) query)
     (throw (ex-info ":servo/connection subscribe query should not include :changes" {:query query})))
-  (let [feed @(run connection (concat query [[:changes {:squash true
-                                                        :include-initial true
-                                                        :include-types true}]]))
+  (let [feed (s/batch
+              (:change-batch-size connection)
+              (:change-batch-latency connection)
+              @(run connection (concat query [[:changes {:squash true
+                                                         :include-initial true
+                                                         :include-types true}]])))
         token (get-in @feeds [feed :token])
         single (= :atom-feed (get-in @feeds [feed :type]))
         value-ref (signal (if single nil []))]
     (swap! subscriptions assoc value-ref feed)
-    (s/consume (fn [change]
-                 (cond
-                   (#{"remove" "uninitial"} (:type change))
-                   (alter! value-ref
-                           (if single
-                             (constantly nil)
-                             (comp vec (partial remove #(= (:id %) (get-in change [:old-val :id]))))))
+    (s/consume (fn [changes]
+                 (alter!
+                  value-ref
+                  (fn [value]
+                    (reduce (fn [value change]
+                              (cond
+                                (#{"remove" "uninitial"} (:type change))
+                                (if single
+                                  nil
+                                  (vec (remove #(= (:id %) (get-in change [:old-val :id])) value)))
 
-                   (= "change" (:type change))
-                   (alter! value-ref
-                           (if single
-                             (constantly (:new-val change))
-                             (partial mapv #(if (= (get-in change [:new-val :id]) (:id %)) (:new-val change) %))))
+                                (= "change" (:type change))
+                                (if single
+                                  (:new-val change)
+                                  (mapv #(if (= (get-in change [:new-val :id]) (:id %)) (:new-val change) %) value))
 
-                   (#{"add" "initial"} (:type change))
-                   (alter! value-ref
-                           (if single
-                             (constantly (:new-val change))
-                             #(conj % (:new-val change))))
+                                (#{"add" "initial"} (:type change))
+                                (if single
+                                  (:new-val change)
+                                  (conj value (:new-val change)))
 
-                   :else (log/warn ":servo/connection unknown change type" query change)))
+                                :else (log/warn ":servo/connection unknown change type" query change))) value changes))))
                feed)
     value-ref))
 
