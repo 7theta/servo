@@ -33,9 +33,6 @@
     :trace true}
 
    :servo/subs
-   {:db-connection (ig/ref :servo/connection)}
-
-   :servo/events
    {:db-connection (ig/ref :servo/connection)}})
 
 (ig/load-namespaces config)

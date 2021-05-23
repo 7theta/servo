@@ -191,7 +191,7 @@
 
                      :else (log/warn ":servo/connection unknown change type" query change))
                    (catch Exception e
-                     (log/error ":servo/connection changefeed error" e))))
+                     (log/error ":servo/connection change error" e))))
                feed)
     value-ref))
 
