@@ -41,10 +41,10 @@
        :server-scram (assoc server-scram :iterations iterations)})))
 
 (defn authentication-request
-  [{:keys [client-initial-scram server-authentication server-scram]}]
+  [{:keys [client-initial-scram server-authentication server-scram password]}]
   (let [client-scram {:header-and-channel-binding "biws"
                       :nonce (:nonce server-scram)}
-        salted-password (crypto/pbkdf2 "" (:salt server-scram) (:iterations server-scram))
+        salted-password (crypto/pbkdf2 password (:salt server-scram) (:iterations server-scram))
         client-key (crypto/hmac salted-password "Client Key")
         stored-key (crypto/sha256 client-key)
         authentication-message (str (encode client-initial-scram) ","

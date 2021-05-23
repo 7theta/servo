@@ -24,6 +24,7 @@
             [utilis.types.number :refer [string->long string->double]]
             [clojure.string :as st]
             [integrant.core :as ig]
+            [metrics.gauges :refer [gauge-fn]]
             [clojure.tools.logging :as log])
   (:import [tempus.core DateTime]
            [java.nio ByteBuffer ByteOrder]
@@ -43,11 +44,9 @@
 
 (defn connect
   [{:keys [db-server db-name await-ready trace
-           response-buffer change-batch-size change-batch-latency]
+           response-buffer-size]
     :or {await-ready true
-         response-buffer 100
-         change-batch-size 1000
-         change-batch-latency 50}}]
+         response-buffer-size 1000}}]
   (let [{:keys [host port username password]
          :or {host "localhost"
               port 28015
@@ -73,7 +72,8 @@
                                                                                (recv))
           {:keys [message server-signature]} (scram/authentication-request {:client-initial-scram client-initial-scram
                                                                             :server-authentication server-authentication
-                                                                            :server-scram server-scram})
+                                                                            :server-scram server-scram
+                                                                            :password password})
           _ (send message)
           {:keys [authentication success]} (recv)]
       (when-not (and success (scram/validate-server {:server-signature server-signature
@@ -81,19 +81,23 @@
         (throw (ex-info ":servo/connection authentication failed"
                         {:client-initial-scram client-initial-scram
                          :server-scram server-scram})))
-      (let [connection {:server-version version
+      (let [queries (atom {})
+            feeds (atom {})
+            connection {:server-version version
                         :db-name db-name
                         :db-term {:db (:query (->rt-query [[:db db-name]]))}
                         :query-counter (atom (long 0))
-                        :queries (atom {})
-                        :feeds (atom {})
+                        :queries queries
+                        :feeds feeds
                         :subscriptions (atom {})
                         :tcp-connection @tcp-connection
                         :rql-connection (->rql-connection @tcp-connection)
-                        :response-buffer response-buffer
-                        :change-batch-size change-batch-size
-                        :change-batch-latency change-batch-latency
+                        :response-buffer-size response-buffer-size
                         :trace trace}]
+        (gauge-fn ["servo" "queries" "active"]
+                  #(- (count @queries) (count @feeds)))
+        (gauge-fn ["servo" "feeds" "active"]
+                  #(count @feeds))
         (s/consume (partial handle-message connection) (:rql-connection connection))
         (ensure-db connection db-name)
         (when await-ready (await-tables-ready connection))
@@ -134,38 +138,60 @@
   [{:keys [feeds subscriptions] :as connection} query]
   (when (some #(= :changes (first %)) query)
     (throw (ex-info ":servo/connection subscribe query should not include :changes" {:query query})))
-  (let [feed (s/batch
-              (:change-batch-size connection)
-              (:change-batch-latency connection)
-              @(run connection (concat query [[:changes {:squash true
-                                                         :include-initial true
-                                                         :include-types true}]])))
+  (let [feed @(run connection (concat query [[:changes {:squash true
+                                                        :include-initial true
+                                                        :include-types true
+                                                        :include-states true}]]))
         token (get-in @feeds [feed :token])
         single (= :atom-feed (get-in @feeds [feed :type]))
-        value-ref (signal (if single nil []))]
+        value-ref (signal (if single nil []))
+        initial-value (atom (if single nil []))]
     (swap! subscriptions assoc value-ref feed)
-    (s/consume (fn [changes]
-                 (alter!
-                  value-ref
-                  (fn [value]
-                    (reduce (fn [value change]
-                              (cond
-                                (#{"remove" "uninitial"} (:type change))
-                                (if single
-                                  nil
-                                  (vec (remove #(= (:id %) (get-in change [:old-val :id])) value)))
+    (s/consume (fn [change]
+                 (try
+                   (cond
+                     (and (= "state" (:type change)) (= "initializing" (:state change)))
+                     nil
 
-                                (= "change" (:type change))
-                                (if single
-                                  (:new-val change)
-                                  (mapv #(if (= (get-in change [:new-val :id]) (:id %)) (:new-val change) %) value))
+                     (and (= "state" (:type change)) (= "ready" (:state change)))
+                     (do (alter! value-ref (constantly @initial-value))
+                         (reset! initial-value nil))
 
-                                (#{"add" "initial"} (:type change))
-                                (if single
-                                  (:new-val change)
-                                  (conj value (:new-val change)))
+                     (= "initial" (:type change))
+                     (if single
+                       (reset! initial-value (:new-val change))
+                       (swap! initial-value conj (:new-val change)))
 
-                                :else (log/warn ":servo/connection unknown change type" query change))) value changes))))
+                     (= "uninitial" (:type change))
+                     (if single
+                       (reset! initial-value nil)
+                       (swap! initial-value (fn [value]
+                                              (let [id (get-in change [:old-val :id])]
+                                                (->> value (remove #(= (:id %) id)) vec)))))
+
+                     (= "add" (:type change))
+                     (alter! value-ref
+                             (if single
+                               (constantly (:new-val change))
+                               #(conj % (:new-val change))))
+
+                     (= "change" (:type change))
+                     (alter! value-ref
+                             (if single
+                               (constantly (:new-val change))
+                               (let [id (get-in change [:new-val :id])]
+                                 (partial mapv #(if (= (:id %) id) (:new-val change) %)))))
+
+                     (= "remove" (:type change))
+                     (alter! value-ref
+                             (if single
+                               (constantly nil)
+                               (let [id (get-in change [:old-val :id])]
+                                 (comp vec (partial remove #(= (:id %) id))))))
+
+                     :else (log/warn ":servo/connection unknown change type" query change))
+                   (catch Exception e
+                     (log/error ":servo/connection changefeed error" e))))
                feed)
     value-ref))
 
@@ -236,14 +262,14 @@
 (declare response-types response-note-types response-error-types)
 
 (defn- handle-message
-  [{:keys [queries feeds response-buffer trace] :as connection} [token response]]
+  [{:keys [queries feeds response-buffer-size trace] :as connection} [token response]]
   (let [{:keys [r t e n]} response
         {:keys [query response-d response-fn]} (get @queries token)
         success #(when response-d (d/success! response-d %))
         error #(when response-d (d/error! response-d %))
         handle-seq (fn [& {:keys [close] :or {close false}}]
                      (when-not (and (d/realized? response-d) (s/stream? @response-d))
-                       (let [feed (s/stream response-buffer (map response-fn))]
+                       (let [feed (s/stream response-buffer-size (map response-fn))]
                          (swap! feeds assoc feed {:type (get response-note-types (first n))
                                                   :token token})
                          (success feed)))

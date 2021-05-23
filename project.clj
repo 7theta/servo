@@ -22,6 +22,7 @@
                  [inflections "0.13.2"]
 
                  [com.7theta/utilis "1.12.2"]
+                 [metrics-clojure "2.10.0"]
                  [integrant "0.8.0"]]
   :profiles {:dev {:global-vars {*warn-on-reflection* true}
                    :dependencies [[org.clojure/tools.namespace "1.1.0"]
