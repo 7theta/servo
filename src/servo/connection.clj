@@ -47,6 +47,7 @@
            response-buffer-size]
     :or {await-ready true
          response-buffer-size 1000}}]
+  (when trace (log/debug "servo/connection connect" (pr-str db-server)))
   (let [{:keys [host port username password]
          :or {host "localhost"
               port 28015
@@ -205,7 +206,7 @@
         (send connection (get-in @feeds [feed :token]) [(get request-types :stop)])
         (swap! feeds dissoc feed)
         (swap! subscriptions dissoc value-ref))
-      (log/error (ex-info ":servo.connection/dispose unknown subscription" {:signal (hash value-ref)}))))
+      (log/warn (ex-info ":servo.connection/dispose unknown subscription" {:signal (hash value-ref)}))))
   nil)
 
 (defn noreply-wait
@@ -256,7 +257,7 @@
 
 (defn- send
   [{:keys [rql-connection trace]} token query]
-  (when trace (log/info (format ">> 0x%04x" token) (pr-str query)))
+  (when trace (log/debug (format ">> 0x%04x" token) (pr-str query)))
   (when token (s/put! rql-connection [token query])))
 
 (declare response-types response-note-types response-error-types)
@@ -276,7 +277,7 @@
                      (s/put-all! @response-d r)
                      (when (and response-d close)
                        (s/close! @response-d)))]
-    (when trace (log/info (format "<< 0x%04x" token) (pr-str response)))
+    (when trace (log/debug (format "<< 0x%04x" token) (pr-str response)))
     (try
       (case (get response-types t)
         :success-atom
@@ -352,7 +353,7 @@
         :index-drop {:arguments [(->rt-name (first parameters))]}
         :get {:arguments [(->rt-value (first parameters))]
               :response-fn rt->}
-        :get-all {:arguments [(first parameters)]
+        :get-all {:arguments (map ->rt-value (first parameters))
                   :options (when-let [index (second parameters)]
                              {"index" (->rt-name (:index index))})
                   :response-fn rt->}
@@ -523,12 +524,12 @@
     (loop []
       (let [ready-count (await-tables-ready)]
         (when (< ready-count (count table-list))
-          (when trace (log/info (format ":servo/connection %s/%s tables ready."
-                                        ready-count
-                                        (count table-list))))
+          (when trace (log/debug (format ":servo/connection %s/%s tables ready."
+                                         ready-count
+                                         (count table-list))))
           (Thread/sleep 1000)
           (recur))))
-    (when trace (log/info ":servo/connection all tables ready"))))
+    (when trace (log/debug ":servo/connection all tables ready"))))
 
 (def ^:private request-types
   {:start 1
