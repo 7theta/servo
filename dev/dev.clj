@@ -12,10 +12,11 @@
   "Tools for interactive development with the REPL. This file should
   not be included in a production build of the application."
   (:require [servo.connection :as servo]
+            [signum.signal :refer [signal alter!]]
             [signum.subs :refer [subscribe]]
 
             [integrant.core :as ig]
-            [integrant.repl :refer [clear init reset reset-all] :as igr]
+            [integrant.repl :as igr]
             [integrant.repl.state :refer [system]]
 
             [clojure.tools.namespace.repl :refer [refresh refresh-all]]
@@ -28,12 +29,10 @@
 (def config
   {:servo/connection
    {:db-server {:host "localhost" :port 28015}
-    :db-name "test"}
+    :db-name :test
+    :trace true}
 
    :servo/subs
-   {:db-connection (ig/ref :servo/connection)}
-
-   :servo/events
    {:db-connection (ig/ref :servo/connection)}})
 
 (ig/load-namespaces config)
@@ -51,3 +50,9 @@
   []
   (igr/halt)
   (reset! dbc nil))
+
+(defn reset
+  []
+  (halt)
+  (igr/reset)
+  (go))

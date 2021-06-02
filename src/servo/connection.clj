@@ -1,387 +1,429 @@
 ;;   Copyright (c) 7theta. All rights reserved.
 ;;   The use and distribution terms for this software are covered by the
-;;   Eclipse Public License 1.0 (http"//www.eclipse.org/legal/epl-v10.html")
-;;   which can be found in the LICENSE file at the root of this
-;;   distribution.
+;;   MIT License (https://opensource.org/licenses/MIT) which can also be
+;;   found in the LICENSE file at the root of this distribution.
 ;;
 ;;   By using this software in any fashion, you are agreeing to be bound by
 ;;   the terms of this license.
 ;;   You must not remove this notice, or any others, from this software.
 
 (ns servo.connection
-  (:refer-clojure :exclude [compile])
-  (:require [tempus.core :as t]
-            [utilis.fn :refer [fsafe]]
-            [utilis.map :refer [compact]]
-            [utilis.types.number :refer [string->long string->double]]
+  (:refer-clojure :exclude [send])
+  (:require [servo.util.scram :as scram]
+            [signum.signal :refer [signal alter!]]
+            [tempus.core :as t]
+            [aleph.tcp :as tcp]
+            [manifold.stream :as s]
+            [manifold.deferred :as d]
+            [gloss.core :as gloss]
+            [gloss.io :as gloss-io]
+            [byte-streams :as bs]
+            [jsonista.core :as json]
             [inflections.core :refer [hyphenate underscore]]
+            [utilis.map :refer [compact map-keys map-vals]]
+            [utilis.types.number :refer [string->long string->double]]
+            [clojure.string :as st]
             [integrant.core :as ig]
-            [clojure.core.protocols :refer [IKVReduce]]
-            [clojure.core.async :refer [sliding-buffer chan >!! <!! close!]])
+            [metrics.gauges :refer [gauge-fn]]
+            [clojure.tools.logging :as log])
   (:import [tempus.core DateTime]
-           [com.rethinkdb RethinkDB]
-           [com.rethinkdb.net Connection Result]
-           [com.rethinkdb.gen.ast ReqlExpr ReqlFunction1 Table]
-           [com.rethinkdb.gen.proto ResponseType]
-           [com.rethinkdb.gen.exc ReqlOpFailedError]
-           [java.time OffsetDateTime]
-           [java.util Iterator ArrayList NoSuchElementException]))
+           [java.nio ByteBuffer ByteOrder]
+           [java.io ByteArrayOutputStream]))
 
-(defonce ^RethinkDB r (RethinkDB/r))
+(declare connect disconnect ->rql-connection ensure-db await-tables-ready
+         json-mapper ->rt-name ->rt-query ->rt-query-term
+         send handle-message token request-types)
 
-(declare connect disconnect
-         ensure-db extant-indices create-index
-         compile changes
-         ->rt-name rt-name-> ->rt-value ->rt rt->
-         await-all-tables-ready
-         run->result tx-result)
-
-(defmethod ig/init-key :servo/connection [_ {:keys [db-server db-name] :as opts}]
-  (connect opts))
+(defmethod ig/init-key :servo/connection [_ options]
+  (connect options))
 
 (defmethod ig/halt-key! :servo/connection [_ connection]
-  (try (disconnect connection) (catch Exception _ nil)))
+  (try (disconnect connection)
+       (catch Exception e
+         (log/error ":servo/connection shutdown exception" e))))
 
 (defn connect
-  [{:keys [db-server db-name await-tables]
-    :or {await-tables true}}]
-  (let [{:keys [host port timeout]
+  [{:keys [db-server db-name await-ready trace
+           response-buffer-size]
+    :or {await-ready true
+         response-buffer-size 1000}}]
+  (when trace (log/debug "servo/connection connect" (pr-str db-server)))
+  (let [{:keys [host port username password]
          :or {host "localhost"
               port 28015
-              timeout 5000}} (compact db-server)
-        db-name (->rt-name db-name)
-        connection (-> r .connection
-                       (.hostname host)
-                       (.port (int port))
-                       (.timeout timeout)
-                       (.db db-name)
-                       .connect)
-        db-connection {:db-server db-server
-                       :db-name db-name
-                       :connection connection
-                       :subscriptions (atom {})}]
-    (ensure-db db-connection)
-    (when await-tables
-      (await-all-tables-ready db-connection))
-    db-connection))
+              username "admin"
+              password ""}} (compact db-server)
+        tcp-connection (tcp/client {:host host :port port})]
+    @(s/put! @tcp-connection (byte-array [0xc3 0xbd 0xc2 0x34]))
+    (let [version (try (:server_version (-> @(s/take! @tcp-connection)
+                                            bs/to-string
+                                            (json/read-value json/keyword-keys-object-mapper)))
+                       (catch Exception _
+                         (throw (ex-info ":servo/connection initial handshake failed"
+                                         {:db-server db-server :db-name db-name}))))
+          send (fn [message]
+                 (s/put! @tcp-connection
+                         (let [json-str (json/write-value-as-string message json-mapper)]
+                           ;; Rethink requires JSON strings to be "null terminated"
+                           (byte-array (inc (count json-str)) (map int json-str)))))
+          recv #(json/read-value (bs/to-string @(s/take! @tcp-connection)) json-mapper)
+          {:keys [message client-initial-scram]} (scram/initial-proposal {:username username})
+          _ (send message)
+          {:keys [server-scram server-authentication]} (scram/server-challenge {:client-initial-scram client-initial-scram}
+                                                                               (recv))
+          {:keys [message server-signature]} (scram/authentication-request {:client-initial-scram client-initial-scram
+                                                                            :server-authentication server-authentication
+                                                                            :server-scram server-scram
+                                                                            :password password})
+          _ (send message)
+          {:keys [authentication success]} (recv)]
+      (when-not (and success (scram/validate-server {:server-signature server-signature
+                                                     :server-authentication authentication}))
+        (throw (ex-info ":servo/connection authentication failed"
+                        {:client-initial-scram client-initial-scram
+                         :server-scram server-scram})))
+      (let [queries (atom {})
+            feeds (atom {})
+            connection {:server-version version
+                        :db-name db-name
+                        :db-term {:db (:query (->rt-query [[:db db-name]]))}
+                        :query-counter (atom (long 0))
+                        :queries queries
+                        :feeds feeds
+                        :subscriptions (atom {})
+                        :tcp-connection @tcp-connection
+                        :rql-connection (->rql-connection @tcp-connection)
+                        :response-buffer-size response-buffer-size
+                        :trace trace}]
+        (gauge-fn ["servo" "queries" "active"]
+                  #(- (count @queries) (count @feeds)))
+        (gauge-fn ["servo" "feeds" "active"]
+                  #(count @feeds))
+        (s/consume (partial handle-message connection) (:rql-connection connection))
+        (ensure-db connection db-name)
+        (when await-ready (await-tables-ready connection))
+        connection))))
 
 (defn disconnect
-  [{:keys [^Connection connection subscriptions]}]
-  (doseq [{:keys [shutdown]} (vals @subscriptions)]
-    ((fsafe shutdown)))
-  (.close connection)
+  [{:keys [queries feeds subscriptions rql-connection tcp-connection]}]
+  (when rql-connection (s/close! rql-connection))
+  (when tcp-connection (s/close! tcp-connection))
   nil)
 
-(defn table-exists?
-  [{:keys [^Connection connection db-name]} table-name]
-  (boolean ((set (-> r
-                     (.db db-name)
-                     .tableList
-                     (.run connection)
-                     tx-result))
-            (->rt-name table-name))))
+(defonce ^:private var-counter (atom 0))
 
-(defn table-status
-  [{:keys [^Connection connection db-name]} table-name]
-  (-> r
-      (.db db-name)
-      (.table (->rt-name table-name))
-      (.status)
-      (.run connection)
-      (tx-result)))
-
-(defn table-list
-  [{:keys [^Connection connection db-name]}]
-  (->> (-> r
-           (.db (->rt-name db-name))
-           (.tableList)
-           (.run connection)
-           tx-result)
-       (map rt-name->)))
-
-(defn ensure-table
-  [{:keys [^Connection connection db-name]} table-name]
-  (locking connection
-    (try
-      (let [table-name (->rt-name table-name)]
-        (when-not ((set (first (-> r (.db db-name) .tableList (.run connection)))) table-name)
-          (-> r (.db db-name) (.tableCreate table-name) (.run connection))))
-      (catch ReqlOpFailedError _ nil))))
-
-(defn delete-table
-  [{:keys [^Connection connection db-name]} table-name]
-  (let [table-name (->rt-name table-name)]
-    (-> r (.db db-name) (.tableDrop table-name) (.run connection))))
-
-(defn ensure-index
-  [{:keys [^Connection connection db-name] :as db-connection} table-name index & opts]
-  (locking connection
-    (try
-      (let [table-name (->rt-name table-name)
-            [index-name & fields] (mapv ->rt-name (if (sequential? index) index [index]))]
-        (when-not ((extant-indices db-connection table-name) index-name)
-          (create-index db-connection table-name index-name fields opts)))
-      (catch ReqlOpFailedError _ nil))))
-
-(defn delete-index
-  [{:keys [^Connection connection db-name]} table-name field-name]
-  (let [table-name (->rt-name table-name)
-        field-name (->rt-name field-name)]
-    (-> r (.db db-name) (.table table-name)
-        (.indexDrop field-name)
-        (.run connection))))
-
-(defn uuid
-  [{:keys [^Connection connection db-name]}]
-  (-> r (.uuid) (.run connection) (.single)))
-
-(defn pred
-  [expr]
-  (reify ReqlFunction1
-    (apply [this row]
-      (compile expr row))))
-
-(defn ^ReqlExpr compile
-  ([expr] (compile expr r))
-  ([expr r]
-   (reduce (fn [^ReqlExpr expr [op & opts]]
-             (let [opts (mapv #(cond-> %
-                                 (and (vector? %)
-                                      (not= :pred op)) compile)
-                              opts)]
-               (case op
-                 :db (.db expr (->rt-name (first opts)))
-                 :table (.table expr (->rt-name (first opts)))
-                 :changes (.changes expr)
-                 :opt-arg (let [[option value] opts]
-                            (.optArg expr (->rt-name option) (cond-> value (keyword? value) name)))
-                 :get (.get expr (first (->rt-value (first opts))))
-                 :get-all (let [[field value] (cond->> opts (= 1 (count opts)) (cons :id))]
-                            (-> expr
-                                (.getAll (into-array (cond-> value (not (coll? value)) vector)))
-                                (.optArg "index" (->rt-name field))))
-                 :insert (.insert expr (let [value (first opts)
-                                             value (cond-> value (or (map? value) (not (coll? value))) vector)]
-                                         (->> value (map ->rt)
-                                              (into-array clojure.lang.IPersistentMap))))
-                 :update (.update expr (->rt (first opts)))
-                 :delete (.delete expr)
-                 :filter (cond
-
-                           (map? (first opts))
-                           (let [[m {:keys [default] :or {default false}}] opts]
-                             (-> expr
-                                 (.filter (->rt m))
-                                 (.optArg "default" default)))
-
-                           (instance? com.rethinkdb.gen.ast.ReqlFunction1 (first opts))
-                           (.filter expr (first opts))
-
-                           :else
-                           (let [[field value {:keys [default] :or {default false}}] opts]
-                             (-> expr
-                                 (.filter (.hashMap r (->rt-name field) (first (->rt-value value))))
-                                 (.optArg "default" default))))
-                 :between (let [[field lower upper] opts]
-                            (-> expr
-                                (.between lower upper)
-                                (.optArg "index" (->rt-name field))))
-                 :order-by (let [[index & [direction]] opts
-                                 direction (or direction :asc)]
-                             (-> expr
-                                 (.orderBy)
-                                 (.optArg "index"
-                                          (if (= direction :asc)
-                                            (.asc r (->rt-name index))
-                                            (.desc r (->rt-name index))))))
-                 :get-field (.getField expr (->rt-name (first opts)))
-                 :pluck (.pluck expr (into-array (map ->rt-name opts)))
-                 :with-fields (.withFields expr (into-array (map ->rt-name opts)))
-                 :without (.without expr (into-array (map ->rt-name opts)))
-                 :contains (.contains expr (first (->rt-value (first opts))))
-                 :nth (.nth expr (first opts))
-                 :pred (pred (first opts))
-                 :count (.count expr)
-                 :skip (.skip expr (first opts))
-                 :limit (.limit expr (first opts))
-                 :distinct (if-some [index (first opts)]
-                             (.optArg (.distinct expr) "index" (->rt-name index))
-                             (.distinct expr))
-                 :match (.match expr (first opts))
-                 :slice (let [[start end] opts]
-                          (.slice expr start end))
-                 :during (let [[start end] opts]
-                           (.during expr start end)))))
-           r expr)))
+(defmacro func
+  [params body]
+  (let [vars (reduce (fn [params p] (assoc params p (swap! var-counter inc))) {} params)]
+    `[:func
+      [(into [:make-array] ~(mapv vars params))
+       (into [~(first body)] ~(mapv (fn [v]
+                                      (if-let [vi (get vars v)]
+                                        [10 [vi]]
+                                        v)) (rest body)))]]))
 
 (defn run
-  [connection expr]
-  (let [result (try (tx-result (run->result connection expr))
-                    (catch NoSuchElementException e
-                      (println "Encountered NoSuchElementException in run, retrying.")
-                      ::retry))]
-    (if (not= ::retry result)
-      result
-      (recur connection expr))))
+  [{:keys [db-term queries] :as connection} query & {:keys [query-type] :or {query-type :start}}]
+  (let [token (token connection)
+        response-d (d/deferred)
+        {:keys [response-fn query]} (->rt-query query)]
+    (swap! queries assoc token {:query query
+                                :response-d response-d
+                                :response-fn response-fn})
+    (when-not @(send connection token [(get request-types query-type) query db-term])
+      (swap! queries dissoc token)
+      (throw (ex-info ":servo/connection send failed" {:connection connection :query query})))
+    response-d))
 
 (defn subscribe
-  [db-connection expr value-ref]
-  (reset! value-ref (let [result (run db-connection expr)]
-                      (if (map? result)
-                        result
-                        (->> result
-                             (reduce (fn [value row] (assoc! value (:id row) row))
-                                     (transient {}))
-                             persistent!))))
-  (changes db-connection expr value-ref))
+  [{:keys [feeds subscriptions] :as connection} query]
+  (when (some #(= :changes (first %)) query)
+    (throw (ex-info ":servo/connection subscribe query should not include :changes" {:query query})))
+  (let [feed @(run connection (concat query [[:changes {:squash true
+                                                        :include-initial true
+                                                        :include-types true
+                                                        :include-states true}]]))
+        token (get-in @feeds [feed :token])
+        single (= :atom-feed (get-in @feeds [feed :type]))
+        value-ref (signal (if single nil []))
+        initial-value (atom (if single nil []))]
+    (swap! subscriptions assoc value-ref feed)
+    (s/consume (fn [change]
+                 (try
+                   (cond
+                     (and (= "state" (:type change)) (= "initializing" (:state change)))
+                     nil
+
+                     (and (= "state" (:type change)) (= "ready" (:state change)))
+                     (do (alter! value-ref (constantly @initial-value))
+                         (reset! initial-value nil))
+
+                     (= "initial" (:type change))
+                     (if single
+                       (reset! initial-value (:new-val change))
+                       (swap! initial-value conj (:new-val change)))
+
+                     (= "uninitial" (:type change))
+                     (if single
+                       (reset! initial-value nil)
+                       (swap! initial-value (fn [value]
+                                              (let [id (get-in change [:old-val :id])]
+                                                (->> value (remove #(= (:id %) id)) vec)))))
+
+                     (= "add" (:type change))
+                     (alter! value-ref
+                             (if single
+                               (constantly (:new-val change))
+                               #(conj % (:new-val change))))
+
+                     (= "change" (:type change))
+                     (alter! value-ref
+                             (if single
+                               (constantly (:new-val change))
+                               (let [id (get-in change [:new-val :id])]
+                                 (partial mapv #(if (= (:id %) id) (:new-val change) %)))))
+
+                     (= "remove" (:type change))
+                     (alter! value-ref
+                             (if single
+                               (constantly nil)
+                               (let [id (get-in change [:old-val :id])]
+                                 (comp vec (partial remove #(= (:id %) id))))))
+
+                     :else (log/warn ":servo/connection unknown change type" query change))
+                   (catch Exception e
+                     (log/error ":servo/connection change error" e))))
+               feed)
+    value-ref))
+
+(def ->seq s/stream->seq)
 
 (defn dispose
-  [{:keys [subscriptions]} subscription]
-  (when-let [{:keys [shutdown]} (clojure.core/get @subscriptions subscription)]
-    ((fsafe shutdown))
-    (swap! subscriptions dissoc subscription))
+  [{:keys [feeds subscriptions] :as connection} value-ref]
+  (locking connection
+    (if-let [feed (get @subscriptions value-ref)]
+      (when-let [token (get-in @feeds [feed :token])]
+        (send connection (get-in @feeds [feed :token]) [(get request-types :stop)])
+        (swap! feeds dissoc feed)
+        (swap! subscriptions dissoc value-ref))
+      (log/warn (ex-info ":servo.connection/dispose unknown subscription" {:signal (hash value-ref)}))))
   nil)
+
+(defn noreply-wait
+  [connection]
+  (run connection nil :query-type :noreply-wait))
+
+(defn server-info
+  [connection]
+  (run connection nil :query-type :server-info))
+
+(defn ensure-table
+  [connection table-name]
+  (let [table-list (set @(run connection [[:table-list]]))]
+    (when-not (get table-list table-name)
+      @(run connection [[:table-create table-name]]))))
+
+(defn ensure-index
+  [connection table-name index-name & options]
+  (let [index-list (set @(run connection [[:table table-name] [:index-list]]))]
+    (when-not (get index-list index-name)
+      @(run connection [[:table table-name] (cond-> [:index-create index-name]
+                                              (not-empty options) (conj options))]))))
+
 
 ;;; Private
 
-(defn- ensure-db
-  [{:keys [^Connection connection db-name]}]
-  (when-not ((set (first (-> r .dbList (.run connection)))) db-name)
-    (-> r (.dbCreate db-name) (.run connection))))
+(def ^:private json-mapper (json/object-mapper
+                            {:encode-key-fn (comp underscore name)
+                             :decode-key-fn (comp keyword hyphenate)}))
 
-(defn- extant-indices
-  [{:keys [^Connection connection db-name]} table-name]
-  (-> r
-      (.db db-name)
-      (.table table-name)
-      .indexList
-      (.run connection)
-      first
-      set))
+(defn- token
+  [{:keys [query-counter]}]
+  (swap! query-counter inc))
 
-(defn- create-index
-  [{:keys [^Connection connection db-name]} table-name index-name fields {:keys [multi]}]
-  (as-> r <>
-    (.db <> db-name)
-    (.table <> table-name)
-    (if (empty? fields)
-      (.indexCreate ^Table <> index-name)
-      (.indexCreate ^Table <> index-name
-                    (reify ReqlFunction1
-                      (apply [this row]
-                        (reduce (fn [exp field] (.g ^ReqlExpr exp field)) row fields)))))
-    (if multi (.optArg ^ReqlExpr <> "multi" true) <>)
-    (.run ^ReqlExpr <> connection)))
+(def ^:private rql-protocol
+  (gloss/compile-frame
+   [:int64-be (gloss/finite-frame :int32-le (gloss/string :utf-8))]
+   (fn [[token query]]
+     [token (json/write-value-as-string query json-mapper)])
+   (fn [[token query-str]]
+     [token (json/read-value query-str json-mapper)])))
 
-(defn- run->result
-  [{:keys [^Connection connection db-name]} expr]
-  (.run (compile expr) connection))
+(defn- ->rql-connection
+  [tcp-connection]
+  (let [out (s/stream)]
+    (s/connect (s/map (partial gloss-io/encode rql-protocol) out) tcp-connection)
+    (s/splice out (gloss-io/decode-stream tcp-connection rql-protocol))))
 
-(extend-protocol IKVReduce
-  java.util.Map
-  (kv-reduce
-    [amap f init]
-    (let [^java.util.Iterator iter (.. amap entrySet iterator)]
-      (loop [ret init]
-        (if (.hasNext iter)
-          (let [^java.util.Map$Entry kv (.next iter)
-                ret (f ret (.getKey kv) (.getValue kv))]
-            (if (reduced? ret)
-              @ret
-              (recur ret)))
-          ret)))))
+(defn- send
+  [{:keys [rql-connection trace]} token query]
+  (when trace (log/debug (format ">> 0x%04x" token) (pr-str query)))
+  (when token (s/put! rql-connection [token query])))
 
-(defn- changes
-  [db-connection expr value-ref]
-  (let [single-value (some (partial = :get) (map first expr))
-        local-value-ref (atom @value-ref)
-        local-value-ch (chan (sliding-buffer 1))
-        callback-fn (fn [changes]
-                      (let [value (swap! local-value-ref (fn [m]
-                                                           (reduce (fn [m {:keys [type id value]}]
-                                                                     (if (= :remove type)
-                                                                       (if single-value {} (dissoc m id))
-                                                                       (if single-value value (assoc m id value)))) m changes)))]
-                        (>!! local-value-ch value)))
-        sub-id (str (java.util.UUID/randomUUID))
-        sub (future
-              (loop []
-                (when (= ::retry
-                         (try
-                           (let [cursor (run->result db-connection
-                                                     (concat expr
-                                                             [[:changes]
-                                                              #_[:opt-arg :include-initial true]
-                                                              [:opt-arg :squash true]
-                                                              [:opt-arg :include-types true]
-                                                              #_[:opt-arg :include-states true]]))]
-                             (loop [changes (.iterator ^Result cursor)]
-                               (let [raw-change (.next ^Iterator changes)]
-                                 (when-let [change (not-empty
-                                                    (-> (rt-> raw-change)
-                                                        (update :type keyword)))]
-                                   (case (:type change)
-                                     :remove
-                                     (callback-fn [{:type :remove
-                                                    :id (get-in change [:old-val :id])}])
+(declare response-types response-note-types response-error-types)
 
-                                     :change
-                                     (callback-fn [{:type :remove
-                                                    :id (get-in change [:old-val :id])}
-                                                   {:type :add
-                                                    :id (get-in change [:new-val :id])
-                                                    :value (:new-val change)}])
+(defn- handle-message
+  [{:keys [queries feeds response-buffer-size trace] :as connection} [token response]]
+  (let [{:keys [r t e n]} response
+        {:keys [query response-d response-fn]} (get @queries token)
+        success #(when response-d (d/success! response-d %))
+        error #(when response-d (d/error! response-d %))
+        handle-seq (fn [& {:keys [close] :or {close false}}]
+                     (when-not (and (d/realized? response-d) (s/stream? @response-d))
+                       (let [feed (s/stream response-buffer-size (map response-fn))]
+                         (swap! feeds assoc feed {:type (get response-note-types (first n))
+                                                  :token token})
+                         (success feed)))
+                     (s/put-all! @response-d r)
+                     (when (and response-d close)
+                       (s/close! @response-d)))]
+    (when trace (log/debug (format "<< 0x%04x" token) (pr-str response)))
+    (try
+      (case (get response-types t)
+        :success-atom
+        (do (success (response-fn (first r)))
+            (swap! queries dissoc token))
 
-                                     :add
-                                     (callback-fn [{:type :add
-                                                    :id (get-in change [:new-val :id])
-                                                    :value (:new-val change)}])
+        :success-sequence
+        (do (handle-seq :close true)
+            (swap! queries dissoc token))
 
-                                     nil)))
-                               (recur changes)))
-                           (catch NoSuchElementException e
-                             (println "Encountered NoSuchElementException in changefeed, retrying.")
-                             ::retry)
-                           (catch Exception e
-                             (when-not (= "java.lang.InterruptedException"
-                                          (-> e Throwable->map :via first :message))
-                               (println "Error (" (pr-str expr) "):"
-                                        (pr-str (Throwable->map e)))
-                               (println (.printStackTrace e))
-                               (close! local-value-ch)
-                               (swap! (:subscriptions db-connection) dissoc sub-id)))))
-                  (recur))))
-        local-value-ft (future
-                         (loop []
-                           (when-let [value (<!! local-value-ch)]
-                             (try
-                               (reset! value-ref value)
-                               (catch Exception e))
-                             (recur))))]
-    (swap! (:subscriptions db-connection) assoc sub-id
-           {:shutdown (fn []
-                        (try
-                          (try (future-cancel sub) (catch Exception e))
-                          (close! local-value-ch)
-                          (catch Exception e
-                            )))})
-    sub-id))
+        :success-partial
+        (do (handle-seq :close false)
+            (send connection token [(get request-types :continue)]))
+
+        :wait-complete
+        (do (success (response-fn nil))
+            (swap! queries dissoc token))
+
+        :server-info
+        (do (success (response-fn (first r)))
+            (swap! queries dissoc token))
+
+        :client-error
+        (do (error (ex-info ":servo/connection client-error"
+                            {:query query :error (get response-error-types e) :error-text (first r)}))
+            (swap! queries dissoc token))
+
+        :compile-error
+        (do (error (ex-info ":servo/connection compile-error"
+                            {:query query :error (get response-error-types e) :error-text (first r)}))
+            (swap! queries dissoc token))
+
+        :runtime-error
+        (do (error (ex-info ":servo/connection runtime-error"
+                            {:query query :error (get response-error-types e) :error-text (first r)}))
+            (swap! queries dissoc token)))
+      (catch Exception e
+        (error (ex-info ":servo/connection response error"
+                        {:query query :token token :response response :error e}))
+        (swap! queries dissoc token)))))
+
+(declare term-types response-types response-error-types
+         ->rt ->rt-options ->rt-key ->rt-name ->rt-value
+         rt-> rt-string-> rt-key-> rt-name-> rt-value->)
+
+(defn- ->rt-query-term
+  [[id & parameters]]
+  (compact
+   (merge
+    {:id (get term-types id)}
+    (let [nested-fields #(reduce merge
+                                 ((fn xform [params]
+                                    (map (fn [v]
+                                           (cond
+                                             (or (keyword? v) (string? v)) {(->rt-key v) true}
+                                             (map? v) (->> (map (fn [[k v]]
+                                                                  [(->rt-key k) (reduce merge (xform v))]) v)
+                                                           (into {}))))
+                                         params)) parameters))]
+      (case id
+        :db-list {:response-fn (partial map rt-name->)}
+        :db {:arguments [(->rt-name (first parameters))]}
+        :db-create {:arguments [(->rt-name (first parameters))]}
+        :table-list {:response-fn (partial map rt-name->)}
+        :index-list {:response-fn (partial map rt-name->)}
+        :table {:arguments [(->rt-name (first parameters))]
+                :response-fn rt->}
+        :table-create {:arguments [(->rt-name (first parameters))]}
+        :table-drop {:arguments [(->rt-name (first parameters))]}
+        :index-create {:arguments [(->rt-name (first parameters))]}
+        :index-wait {:arguments [(->rt-name (first parameters))]}
+        :index-rename {:arguments [map] ->rt-name parameters}
+        :index-drop {:arguments [(->rt-name (first parameters))]}
+        :get {:arguments [(->rt-value (first parameters))]
+              :response-fn rt->}
+        :get-all {:arguments (map ->rt-value (first parameters))
+                  :options (when-let [index (second parameters)]
+                             {"index" (->rt-name (:index index))})
+                  :response-fn rt->}
+        :insert (let [[value options] parameters]
+                  {:arguments [(if (or (map? value) (not (coll? value)))
+                                 (->rt value)
+                                 [(get term-types :make-array)
+                                  (map ->rt value)])]
+                   :options (->rt-options options)})
+        :update (let [[value options] parameters]
+                  {:arguments [(->rt value)]
+                   :options (->rt-options options)})
+        :filter (let [[value options] parameters]
+                  (merge
+                   (cond
+                     (map? value)
+                     {:arguments [(->rt value)]})
+                   {:options options
+                    :response-fn rt->}))
+        :between (let [[lower upper options] parameters]
+                   {:arguments (map ->rt-value [lower upper])
+                    :options (when options
+                               {"index" (->rt-name (:index options))})})
+        :order-by (if (map? (first parameters))
+                    (let [{:keys [index]} (first parameters)]
+                      {:options {"index" (if (and (vector? index)
+                                                  (#{:asc :desc} (first index)))
+                                           (let [[order index] index]
+                                             [(get term-types order) [(->rt-name index)]])
+                                           (->rt-name index))}})
+                    {:arguments [(->rt-name (first parameters))]})
+        :get-field {:arguments [(->rt-name (first parameters))]}
+        :pluck {:arguments [(nested-fields)]}
+        :with-fields {:arguments [(nested-fields)]}
+        :without {:arguments [(nested-fields)]}
+        :contains {:arguments [(first (->rt-value (first parameters)))]}
+        :nth {:arguments [(first parameters)]}
+        ;;:pred (pred (first parameters))
+        :distinct (when-some [index (first parameters)]
+                    {:arguments [{"index" (->rt-name index)}]})
+        ;;:slice (let [[start end] parameters] {:arguments [[start end]]})
+        :during (let [[start end] parameters] {:arguments [[(->rt-value start) (->rt-value end)]]})
+        ;; :func (let [[params body] (first parameters)]
+        ;;         [(->rt-query-term params) (->rt-query-term body)])
+        :changes {:options (map-keys (comp underscore name) (first parameters))
+                  :response-fn #(cond-> % (:new-val %) (update :new-val rt->) (:old-val %) (update :old-val rt->))}
+        {:arguments parameters})))))
+
+(defn- ->rt-query
+  [query]
+  {:query (reduce (fn [query term]
+                    (let [{:keys [id arguments options]} (->rt-query-term term)]
+                      (remove nil? [id (cond->> arguments query (cons query)
+                                                true (remove nil?)) options]))) nil query)
+   :response-fn (or (->> (map (comp :response-fn ->rt-query-term) query)
+                         (remove nil?)
+                         last)
+                    rt->)})
+
 
 (defn- xform-map
   [m kf vf]
   (into {} (map (fn [[k v]]
                   [(kf k)
-                   (let [[value handled?] (vf v)]
-                     (if-not handled?
-                       (cond
-                         (or (instance? java.util.Map v) (map? v))
-                         (xform-map v kf vf)
-                         (or (instance? java.util.List v) (coll? v))
-                         (mapv #(if (or (map? %) (instance? java.util.Map %))
-                                  (xform-map % kf vf)
-                                  (first (vf %))) v)
-                         :else v)
-                       value))]) m)))
+                   (cond
+                     (and (map? v) (= "TIME" (get v "$reql_type$"))) (vf v)
+                     (and (map? v) (= "TIME" (get v :$reql-type$))) (vf v)
+                     (instance? DateTime v) (vf v)
+                     (map? v) (xform-map v kf vf)
+                     :else (vf v))]) m)))
 
 (defn- ->rt-name
   [s]
@@ -400,23 +442,39 @@
     (string? k) (str "servo/str=" (->rt-name k))
     (double? k) (str "servo/double=" (str k))
     (int? k) (str "servo/long=" (str k))
-    :else (throw (ex-info "Unsupported type for key" {:key k}))))
+    :else (throw (ex-info ":servo/connection unsupported type for key" {:key k}))))
+
+(defn- rt-key->
+  [k]
+  (let [k (cond-> k (keyword? k) name)
+        coerced (rt-string-> k)]
+    (if (= k coerced)
+      (keyword (hyphenate k))
+      coerced)))
 
 (defn- ->rt-value
   [v]
   (cond
-    (keyword? v) [(str "servo/keyword=" (->rt-name v)) true]
-    (instance? DateTime v) [(t/into :native v) true]
-    :else [v false]))
+    (keyword? v) (str "servo/keyword=" (->rt-name v))
+    (instance? DateTime v) {"$reql_type$" "TIME"
+                            "epoch_time" (double (/ (t/into :long v) 1000))
+                            "timezone" "+00:00"}
+    (or (vector? v) (seq? v)) [(get term-types :make-array)
+                               (map ->rt v)]
+    :else v))
 
-(defn- ->rt
-  [m]
-  (xform-map m ->rt-key ->rt-value))
+(defn- rt-value->
+  [v]
+  (cond
+    (and (map? v) (= "TIME" (get v "$reql_type$"))) (t/from :long (* 1000 (get v "epoch_time")))
+    (and (map? v) (= "TIME" (get v :$reql-type$))) (t/from :long (* 1000 (get v :epoch-time)))
+    (or (vector? v) (seq? v)) (into (empty v) (map rt-> v))
+    (string? v) (rt-string-> v)
+    :else v))
 
 (defn- rt-string->
   [s]
-  (let [long string->long
-        [_ type-fn value-str] (re-find #"^servo/(.*)=(.*)$" s)]
+  (let [[_ type-fn value-str] (re-find #"^servo/(.*)=(.*)$" s)]
     (if (and type-fn value-str)
       ((case type-fn
          "keyword" (comp keyword hyphenate)
@@ -425,55 +483,272 @@
          "long" string->long) value-str)
       s)))
 
-(defn- rt-key->
-  [k]
-  (let [coerced (rt-string-> k)]
-    (if (= k coerced)
-      (keyword (hyphenate k))
-      coerced)))
-
-(defn- rt-value->
+(defn- ->rt
   [v]
   (cond
-    (string? v) [(rt-string-> v) true]
-    (instance? OffsetDateTime v) [(t/from :native v) true]
-    (and (or (instance? java.util.List v) (coll? v))
-         (string? (first v))
-         (re-find #"^servo/keyword$" (first v))) [(keyword (second v)) true]
-    :else [v false]))
+    (instance? DateTime v) (->rt-value v)
+    (or (seq? v) (vector? v)) [(get term-types :make-array) (map ->rt v)]
+    (map? v) (xform-map v ->rt-key ->rt-value)
+    :else (->rt-value v)))
+
+(defn- ->rt-options
+  [options]
+  (->> options
+       (map-vals (fn [option]
+                   (if (keyword? option)
+                     (name option)
+                     option)))
+       ->rt))
 
 (defn- rt->
   [m]
-  (if (or (map? m) (instance? java.util.Map m))
-    (not-empty (xform-map m rt-key-> rt-value->))
-    (first (rt-value-> m))))
-
-(defn tx-result
-  [result]
   (cond
-    (and (instance? Result result) (= (.responseType ^Result result) ResponseType/SUCCESS_ATOM))
-    (let [result (.single ^Result result)]
-      (if (instance? ArrayList result)
-        (map rt-> result)
-        (rt-> result)))
+    (and (map? m) (= "TIME" (get m "$reql_type$"))) (rt-value-> m)
+    (and (map? m) (= "TIME" (get m :$reql-type$))) (rt-value-> m)
+    (map? m) (not-empty (xform-map m rt-key-> rt-value->))
+    :else (rt-value-> m)))
 
-    (instance? Result result)
-    (map rt-> (.toList ^Result result))))
+(defn- ensure-db
+  [connection db-name]
+  (when-not ((set @(run connection [[:db-list]])) (rt-name-> db-name))
+    @(run connection [[:db-create (->rt-name db-name)]])))
 
-(defn await-all-tables-ready
-  [db-conn]
-  (let [table-list (table-list db-conn)
-        tables-ready (fn []
-                       (->> table-list
-                            (map (partial table-status db-conn))
-                            (filter (comp :all-replicas-ready :status))
-                            (count)))]
+(defn- await-tables-ready
+  [{:keys [trace] :as connection}]
+  (let [table-list @(run connection [[:table-list]])
+        await-tables-ready (fn []
+                             (->> table-list
+                                  (map (fn [table]
+                                         @(run connection [[:table table] [:status]])))
+                                  (filter (comp :all-replicas-ready :status))
+                                  count))]
     (loop []
-      (let [ready-count (tables-ready)]
+      (let [ready-count (await-tables-ready)]
         (when (< ready-count (count table-list))
-          (println (format "[servo.connection] %s/%s tables ready."
-                           ready-count
-                           (count table-list)))
-          (Thread/sleep 5000)
+          (when trace (log/debug (format ":servo/connection %s/%s tables ready."
+                                         ready-count
+                                         (count table-list))))
+          (Thread/sleep 1000)
           (recur))))
-    (println "[servo.connection] All tables ready.")))
+    (when trace (log/debug ":servo/connection all tables ready"))))
+
+(def ^:private request-types
+  {:start 1
+   :continue 2
+   :stop 3
+   :noreply-wait 4
+   :server-info 5})
+
+(def ^:private response-types
+  {1 :success-atom
+   2 :success-sequence
+   3 :success-partial
+   4 :wait-complete
+   5 :server-info
+   16 :client-error
+   17 :compile-error
+   18 :runtime-error})
+
+(def ^:private response-error-types
+  {1000000 :internal
+   2000000 :resource-limit
+   3000000 :query-logic
+   3100000 :non-existence
+   4100000 :op-failed
+   4200000 :op-indeterminate
+   5000000 :user
+   6000000 :permission-error})
+
+(def ^:private response-note-types
+  {1 :sequence-feed
+   2 :atom-feed
+   3 :order-by-limit-feed
+   4 :unioned-feed
+   5 :includes-states})
+
+(def ^:private term-types
+  {:datum 1
+   :make-array 2
+   :make-obj 3
+   :javascript 11
+   :uuid 169
+   :http 153
+   :error 12
+   :implicit-var 13
+   :db 14
+   :table 15
+   :get 16
+   :get-all 78
+   :eq 17
+   :ne 18
+   :lt 19
+   :le 20
+   :gt 21
+   :ge 22
+   :not 23
+   :add 24
+   :sub 25
+   :mul 26
+   :div 27
+   :mod 28
+   :floor 183
+   :ceil 184
+   :round 185
+   :append 29
+   :prepend 80
+   :difference 95
+   :set-insert 88
+   :set-intersection 89
+   :set-union 90
+   :set-difference 91
+   :slice 30
+   :skip 70
+   :limit 71
+   :offsets-of 87
+   :contains 93
+   :get-field 31
+   :keys 94
+   :values 186
+   :object 143
+   :has-fields 32
+   :with-fields 96
+   :pluck 33
+   :without 34
+   :merge 35
+   :between-deprecated 36
+   :between 182
+   :reduce 37
+   :map 38
+   :fold 187
+   :filter 39
+   :concat-map 40
+   :order-by 41
+   :distinct 42
+   :count 43
+   :is-empty 86
+   :union 44
+   :nth 45
+   :bracket 170
+   :inner-join 48
+   :outer-join 49
+   :eq-join 50
+   :zip 72
+   :range 173
+   :insert-at 82
+   :delete-at 83
+   :change-at 84
+   :splice-at 85
+   :coerce-to 51
+   :type-of 52
+   :update 53
+   :delete 54
+   :replace 55
+   :insert 56
+   :db-create 57
+   :db-drop 58
+   :db-list 59
+   :table-create 60
+   :table-drop 61
+   :table-list 62
+   :config 174
+   :status 175
+   :wait 177
+   :reconfigure 176
+   :rebalance 179
+   :sync 138
+   :grant 188
+   :index-create 75
+   :index-drop 76
+   :index-list 77
+   :index-status 139
+   :index-wait 140
+   :index-rename 156
+   :set-write-hook 189
+   :get-write-hook 190
+   :funcall 64
+   :branch 65
+   :or 66
+   :and 67
+   :for-each 68
+   :func 69
+   :asc 73
+   :desc 74
+   :info 79
+   :match 97
+   :upcase 141
+   :downcase 142
+   :sample 81
+   :default 92
+   :json 98
+   :iso8601 99
+   :to-iso8601 100
+   :epoch-time 101
+   :to-epoch-time 102
+   :now 103
+   :in-timezone 104
+   :during 105
+   :date 106
+   :time-of-day 126
+   :timezone 127
+   :year 128
+   :month 129
+   :day 130
+   :day-of-week 131
+   :day-of-year 132
+   :hours 133
+   :minutes 134
+   :seconds 135
+   :time 136
+   :monday 107
+   :tuesday 108
+   :wednesday 109
+   :thursday 110
+   :friday 111
+   :saturday 112
+   :sunday 113
+   :january 114
+   :february 115
+   :march 116
+   :april 117
+   :may 118
+   :june 119
+   :july 120
+   :august 121
+   :september 122
+   :october 123
+   :november 124
+   :december 125
+   :literal 137
+   :group 144
+   :sum 145
+   :avg 146
+   :min 147
+   :max 148
+   :split 149
+   :ungroup 150
+   :random 151
+   :changes 152
+   :arguments 154
+   :binary 155
+   :geojson 157
+   :to-geojson 158
+   :point 159
+   :line 160
+   :polygon 161
+   :distance 162
+   :intersects 163
+   :includes 164
+   :circle 165
+   :get-intersecting 166
+   :fill 167
+   :get-nearest 168
+   :polygon-sub 171
+   :to-json-string 172
+   :minval 180
+   :maxval 181
+   :bit-and 191
+   :bit-or 192
+   :bit-xor 193
+   :bit-not 194
+   :bit-sal 195
+   :bit-sar 196})
