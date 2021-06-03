@@ -7,7 +7,7 @@
 ;;   the terms of this license.
 ;;   You must not remove this notice, or any others, from this software.
 
-(defproject com.7theta/servo "2.0.0"
+(defproject com.7theta/servo "2.0.1"
   :description "A rehinkdb client library designed to integrate with signum"
   :url "https://github.com/7theta/servo"
   :license {:name "MIT License"
