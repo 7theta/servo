@@ -394,7 +394,7 @@
         :nth {:arguments [(first parameters)]}
         ;;:pred (pred (first parameters))
         :distinct (when-some [index (first parameters)]
-                    {:arguments [{"index" (->rt-name index)}]})
+                    {:options {"index" (->rt-name index)}})
         ;;:slice (let [[start end] parameters] {:arguments [[start end]]})
         :during (let [[start end] parameters] {:arguments [[(->rt-value start) (->rt-value end)]]})
         ;; :func (let [[params body] (first parameters)]
