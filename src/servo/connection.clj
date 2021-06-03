@@ -378,14 +378,17 @@
                    {:arguments (map ->rt-value [lower upper])
                     :options (when options
                                {"index" (->rt-name (:index options))})})
-        :order-by (if (map? (first parameters))
-                    (let [{:keys [index]} (first parameters)]
-                      {:options {"index" (if (and (vector? index)
-                                                  (#{:asc :desc} (first index)))
-                                           (let [[order index] index]
-                                             [(get term-types order) [(->rt-name index)]])
-                                           (->rt-name index))}})
-                    {:arguments [(->rt-name (first parameters))]})
+        :order-by (let [[param] parameters
+                        ->rt-sort #(if (and (vector? %)
+                                            (#{:asc :desc} (first %)))
+                                     (let [[order index] %]
+                                       [(get term-types order)
+                                        [(->rt-name index)]])
+                                     (->rt-name %))]
+                    (if (map? param)
+                      (let [{:keys [index]} param]
+                        {:options {"index" (->rt-sort index)}})
+                      {:arguments [(->rt-sort param)]}))
         :get-field {:arguments [(->rt-name (first parameters))]}
         :pluck {:arguments [(nested-fields)]}
         :with-fields {:arguments [(nested-fields)]}
