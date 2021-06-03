@@ -224,7 +224,7 @@
       @(run connection [[:table-create table-name]]))))
 
 (defn ensure-index
-  [connection table-name index-name & options]
+  [connection table-name index-name & {:as options}]
   (let [index-list (set @(run connection [[:table table-name] [:index-list]]))]
     (when-not (get index-list index-name)
       @(run connection [[:table table-name] (cond-> [:index-create index-name]
@@ -347,7 +347,8 @@
                 :response-fn rt->}
         :table-create {:arguments [(->rt-name (first parameters))]}
         :table-drop {:arguments [(->rt-name (first parameters))]}
-        :index-create {:arguments [(->rt-name (first parameters))]}
+        :index-create {:arguments [(->rt-name (first parameters))]
+                       :options (->rt (second parameters))}
         :index-wait {:arguments [(->rt-name (first parameters))]}
         :index-rename {:arguments [map] ->rt-name parameters}
         :index-drop {:arguments [(->rt-name (first parameters))]}
