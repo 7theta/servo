@@ -398,8 +398,18 @@
         ;;:pred (pred (first parameters))
         :distinct (when-some [index (first parameters)]
                     {:options {"index" (->rt-name index)}})
-        ;;:slice (let [[start end] parameters] {:arguments [[start end]]})
-        :during (let [[start end] parameters] {:arguments [[(->rt-value start) (->rt-value end)]]})
+        :slice (let [[start opt1 opt2] parameters
+                     [end opts] (if (map? opt1)
+                                  [nil opt1]
+                                  [opt1 opt2])]
+                 {:arguments (vec (concat [start] (when end [end])))
+                  :options (let [{:keys [left-bound right-bound]} opts]
+                             (merge (when left-bound
+                                      {"left_bound" (->rt-name left-bound)})
+                                    (when right-bound
+                                      {"right_bound" (->rt-name right-bound)})))})
+        :during (let [[start end] parameters]
+                  {:arguments [[(->rt-value start) (->rt-value end)]]})
         ;; :func (let [[params body] (first parameters)]
         ;;         [(->rt-query-term params) (->rt-query-term body)])
         :changes {:options (map-keys (comp underscore name) (first parameters))
@@ -416,7 +426,6 @@
                          (remove nil?)
                          last)
                     rt->)})
-
 
 (defn- xform-map
   [m kf vf]
