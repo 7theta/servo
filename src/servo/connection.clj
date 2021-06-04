@@ -224,7 +224,7 @@
       @(run connection [[:table-create table-name]]))))
 
 (defn ensure-index
-  [connection table-name index-name & options]
+  [connection table-name index-name & {:as options}]
   (let [index-list (set @(run connection [[:table table-name] [:index-list]]))]
     (when-not (get index-list index-name)
       @(run connection [[:table table-name] (cond-> [:index-create index-name]
@@ -347,7 +347,8 @@
                 :response-fn rt->}
         :table-create {:arguments [(->rt-name (first parameters))]}
         :table-drop {:arguments [(->rt-name (first parameters))]}
-        :index-create {:arguments [(->rt-name (first parameters))]}
+        :index-create {:arguments [(->rt-name (first parameters))]
+                       :options (->rt (second parameters))}
         :index-wait {:arguments [(->rt-name (first parameters))]}
         :index-rename {:arguments [map] ->rt-name parameters}
         :index-drop {:arguments [(->rt-name (first parameters))]}
@@ -374,17 +375,20 @@
                    {:options options
                     :response-fn rt->}))
         :between (let [[lower upper options] parameters]
-                   {:arguments (map ->rt-value [lower upper])
+                   {:arguments (mapv ->rt-value [lower upper])
                     :options (when options
                                {"index" (->rt-name (:index options))})})
-        :order-by (if (map? (first parameters))
-                    (let [{:keys [index]} (first parameters)]
-                      {:options {"index" (if (and (vector? index)
-                                                  (#{:asc :desc} (first index)))
-                                           (let [[order index] index]
-                                             [(get term-types order) [(->rt-name index)]])
-                                           (->rt-name index))}})
-                    {:arguments [(->rt-name (first parameters))]})
+        :order-by (let [[param] parameters
+                        ->rt-sort #(if (and (vector? %)
+                                            (#{:asc :desc} (first %)))
+                                     (let [[order index] %]
+                                       [(get term-types order)
+                                        [(->rt-name index)]])
+                                     (->rt-name %))]
+                    (if (map? param)
+                      (let [{:keys [index]} param]
+                        {:options {"index" (->rt-sort index)}})
+                      {:arguments [(->rt-sort param)]}))
         :get-field {:arguments [(->rt-name (first parameters))]}
         :pluck {:arguments [(nested-fields)]}
         :with-fields {:arguments [(nested-fields)]}
@@ -393,9 +397,19 @@
         :nth {:arguments [(first parameters)]}
         ;;:pred (pred (first parameters))
         :distinct (when-some [index (first parameters)]
-                    {:arguments [{"index" (->rt-name index)}]})
-        ;;:slice (let [[start end] parameters] {:arguments [[start end]]})
-        :during (let [[start end] parameters] {:arguments [[(->rt-value start) (->rt-value end)]]})
+                    {:options {"index" (->rt-name index)}})
+        :slice (let [[start opt1 opt2] parameters
+                     [end opts] (if (map? opt1)
+                                  [nil opt1]
+                                  [opt1 opt2])]
+                 {:arguments (vec (concat [start] (when end [end])))
+                  :options (let [{:keys [left-bound right-bound]} opts]
+                             (merge (when left-bound
+                                      {"left_bound" (->rt-name left-bound)})
+                                    (when right-bound
+                                      {"right_bound" (->rt-name right-bound)})))})
+        :during (let [[start end] parameters]
+                  {:arguments [[(->rt-value start) (->rt-value end)]]})
         ;; :func (let [[params body] (first parameters)]
         ;;         [(->rt-query-term params) (->rt-query-term body)])
         :changes {:options (map-keys (comp underscore name) (first parameters))
@@ -412,7 +426,6 @@
                          (remove nil?)
                          last)
                     rt->)})
-
 
 (defn- xform-map
   [m kf vf]
