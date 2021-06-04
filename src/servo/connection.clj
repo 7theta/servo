@@ -375,7 +375,7 @@
                    {:options options
                     :response-fn rt->}))
         :between (let [[lower upper options] parameters]
-                   {:arguments (map ->rt-value [lower upper])
+                   {:arguments (mapv ->rt-value [lower upper])
                     :options (when options
                                {"index" (->rt-name (:index options))})})
         :order-by (let [[param] parameters
