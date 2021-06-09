@@ -110,6 +110,10 @@
   (when tcp-connection (s/close! tcp-connection))
   nil)
 
+(defn on-disconnected
+  [{:keys [rql-connection]} f]
+  (s/on-closed rql-connection f))
+
 (defonce ^:private var-counter (atom 0))
 
 (defmacro func
