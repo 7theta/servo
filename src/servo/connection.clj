@@ -44,7 +44,7 @@
 
 (defn connect
   [{:keys [db-server db-name await-ready trace
-           response-buffer-size]
+           response-buffer-size on-disconnected]
     :or {await-ready true
          response-buffer-size 1000}}]
   (when trace (log/debug "servo/connection connect" (pr-str db-server)))
@@ -91,7 +91,9 @@
                         :queries queries
                         :feeds feeds
                         :subscriptions (atom {})
-                        :tcp-connection @tcp-connection
+                        :tcp-connection (if on-disconnected
+                                          (s/on-close @tcp-connection on-disconnected)
+                                          @tcp-connection)
                         :rql-connection (->rql-connection @tcp-connection)
                         :response-buffer-size response-buffer-size
                         :trace trace}]
@@ -111,8 +113,8 @@
   nil)
 
 (defn on-disconnected
-  [{:keys [rql-connection]} f]
-  (s/on-closed rql-connection f))
+  [{:keys [tcp-connection]} f]
+  (s/on-closed tcp-connection f))
 
 (defonce ^:private var-counter (atom 0))
 
