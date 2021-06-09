@@ -82,6 +82,8 @@
         (throw (ex-info ":servo/connection authentication failed"
                         {:client-initial-scram client-initial-scram
                          :server-scram server-scram})))
+      (when on-disconnected
+        (s/on-closed @tcp-connection on-disconnected))
       (let [queries (atom {})
             feeds (atom {})
             connection {:server-version version
@@ -91,9 +93,7 @@
                         :queries queries
                         :feeds feeds
                         :subscriptions (atom {})
-                        :tcp-connection (if on-disconnected
-                                          (s/on-close @tcp-connection on-disconnected)
-                                          @tcp-connection)
+                        :tcp-connection @tcp-connection
                         :rql-connection (->rql-connection @tcp-connection)
                         :response-buffer-size response-buffer-size
                         :trace trace}]
