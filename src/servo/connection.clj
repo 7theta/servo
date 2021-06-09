@@ -44,7 +44,7 @@
 
 (defn connect
   [{:keys [db-server db-name await-ready trace
-           response-buffer-size]
+           response-buffer-size on-disconnected]
     :or {await-ready true
          response-buffer-size 1000}}]
   (when trace (log/debug "servo/connection connect" (pr-str db-server)))
@@ -82,6 +82,8 @@
         (throw (ex-info ":servo/connection authentication failed"
                         {:client-initial-scram client-initial-scram
                          :server-scram server-scram})))
+      (when on-disconnected
+        (s/on-closed @tcp-connection on-disconnected))
       (let [queries (atom {})
             feeds (atom {})
             connection {:server-version version
@@ -109,6 +111,10 @@
   (when rql-connection (s/close! rql-connection))
   (when tcp-connection (s/close! tcp-connection))
   nil)
+
+(defn on-disconnected
+  [{:keys [tcp-connection]} f]
+  (s/on-closed tcp-connection f))
 
 (defonce ^:private var-counter (atom 0))
 
